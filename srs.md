@@ -90,7 +90,7 @@ All selectors and Google-specific heuristics live in this module.
 - A2. A page signal exists that marks an answer as complete.
 - A3. A new turn can be identified as belonging to a specific submission.
 - A4. Citation markers in the answer can be mapped to their source links from the rendered DOM.
-- A5. The conversation URL (or an identifier in it) is observable soon after Google accepts the first turn, before the answer completes.
+- A5. The timing of conversation-URL availability is unverified; it may be observable only after the answer completes. Persistence behavior for either timing is defined by FR-4.2–FR-4.3.
 - A6. The page exposes a state that distinguishes "still generating" from "idle".
 
 ## 3. Functional requirements
@@ -195,7 +195,7 @@ Fixtures protect known cases only; they cannot detect a future Google change. Th
 ### 5.2 Live check (M0 spike, manual, real account)
 1. New session: one question → complete answer with correct citation mapping (A2, A3, A4).
 2. Follow-up that clearly depends on prior context.
-3. `/quit` *while the answer is still generating*, then check the session was saved (A5, FR-4.2).
+3. `/quit` *while the answer is still generating*: when a valid conversation URL is available, verify it was saved immediately; when none is available, verify the unsaved warning was shown, no invalid URL entry was written, and any pre-existing entry was preserved (A5, FR-4.2–FR-4.4).
 4. `/quit`, restart `aim -c`, continue the conversation (FR-4.5, FR-4.7, A1).
 5. Restart Chrome, `aim -r <name>`, continue (A1).
 6. Ctrl-C during generation, try a new prompt (rejected), wait, prompt accepted after Google finishes (A6, FR-3.8).
@@ -226,3 +226,4 @@ Fixtures protect known cases only; they cannot detect a future Google change. Th
 - Chrome remote debugging changes (Chrome 136): https://developer.chrome.com/blog/remote-debugging-port
 - Google Search Help, AI Mode: https://support.google.com/websearch/answer/16011537
 - Google AI features and query fan-out: https://developers.google.com/search/docs/fundamentals/ai-optimization-guide
+- Owner clarification, event `36e9f17f40738976de78a35334d4df50f5170ea6d38be2ca0220935392f65c81` (2026-09-16): removed the A5 before-completion URL assumption and branched live check 3 on valid URL availability.
