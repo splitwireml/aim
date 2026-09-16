@@ -60,7 +60,7 @@ export function toConversationUrl(pageUrl) {
  * Observed (T2): `mstk` appeared 0.6 s after acceptance in 1 of 4 first turns, and together with the footer
  * (completion) in the other 3; the final `mtid` follows ~0.3-2.7 s later. Reopening follows `mstk` only.
  * Until then the early `data-session-thread-id` fills `mtid`;
- * such a URL is provisional: its thread id is not the final one, see checkWritable's firstPrompt.
+ * such a URL is provisional: its thread id is not the final one, so checkWritable cannot confirm it (fails closed).
  * @returns {Promise<{url: string, provisional: boolean} | null>}
  */
 export async function conversationUrl(page) {
@@ -115,9 +115,9 @@ export async function detectAttention(page) {
 
 /**
  * Confirms the tab shows the conversation identified by expectedUrl and accepts follow-ups.
- * Identity: the thread id Google resolves (URL mtid and the highlighted history entry) must equal expectedUrl's mtid.
- * For a provisional URL (saved before Google assigned the final id) pass firstPrompt: the resolved thread's
- * first query must equal it instead.
+ * Identity (always required): the thread id Google resolves (URL mtid and the highlighted history entry) must equal
+ * expectedUrl's mtid. firstPrompt, when given, is only an extra check on the first query, never a substitute:
+ * two threads can share a first query. A provisional URL's mtid is not a thread id, so it fails closed.
  * @returns {Promise<'writable'|'wrong_conversation'|'not_writable'|'attention'>}
  */
 export async function checkWritable(page, expectedUrl, { firstPrompt, timeoutMs = 15000, pollMs = 250 } = {}) {
@@ -130,13 +130,9 @@ export async function checkWritable(page, expectedUrl, { firstPrompt, timeoutMs 
     const shown = shownUrl && threadOf(shownUrl);
     const current = await page.locator(SEL.currentThread).first().getAttribute('data-thread-id', { timeout: 500 }).catch(() => null);
     turns = await readTurns(page).catch(() => null);
-    if (firstPrompt === undefined) {
-      if ((shown && shown !== want) || (current && current !== want)) return 'wrong_conversation';
-    } else if (turns && turns.length && norm(turns[0].query) !== norm(firstPrompt)) {
-      return 'wrong_conversation';
-    }
-    const same = firstPrompt === undefined ? shown === want && current === want : shown && current === shown;
-    if (turns && turns.length && same && (await page.locator(SEL.input).isVisible())) return 'writable';
+    if ((shown && shown !== want) || (current && current !== want)) return 'wrong_conversation';
+    if (firstPrompt !== undefined && turns && turns.length && norm(turns[0].query) !== norm(firstPrompt)) return 'wrong_conversation';
+    if (turns && turns.length && shown === want && current === want && (await page.locator(SEL.input).isVisible())) return 'writable';
     await page.waitForTimeout(pollMs);
   }
   return turns && turns.length ? 'not_writable' : 'wrong_conversation'; // no turns: fresh chat
@@ -194,7 +190,10 @@ export async function waitForTurn(page, turnId, { timeoutMs = 120000, quietMs = 
     const t = await probeTurn(page, turnId);
     debug('wait poll', turnId.index, t ? `signal=${t.signal} len=${t.text.length}` : 'no turn');
     if (t && t.text !== last) { last = t.text; stableSince = Date.now(); }
-    if (t && t.signal && t.text && Date.now() - stableSince >= quietMs) return { status: 'complete', answer: await extractTurn(page, turnId) };
+    if (t && t.signal && t.text && Date.now() - stableSince >= quietMs) {
+      const answer = await extractTurn(page, turnId); // null if the turn was replaced after attribution: never 'complete' without it
+      return answer ? { status: 'complete', answer } : { status: 'incomplete' };
+    }
     await page.waitForTimeout(pollMs);
   }
   return { status: 'incomplete', answer: (await extractTurn(page, turnId).catch(() => null)) || undefined };
