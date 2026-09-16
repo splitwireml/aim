@@ -56,14 +56,23 @@ export function toConversationUrl(pageUrl) {
 }
 
 /**
- * Final conversation URL for the tab, or null. Only a URL Google itself has put in the address bar with both `mstk`
- * and `mtid` counts: that `mtid` is the final thread id (T2 section 1), so checkWritable can confirm it on resume.
- * Observed (T2): `mstk` appears 0.6-10.8 s after acceptance, the final `mtid` ~0.3-2.7 s later. The early
- * `data-session-thread-id` is not the thread id and is never used to build a URL (Review fix 3).
+ * Final conversation URL for the tab, or null. Only a URL Google itself has put in the address bar (`mstk` and `mtid`)
+ * whose `mtid` equals the highlighted history entry's thread id counts: the same identity checkWritable requires on
+ * resume. The address-bar `mtid` can be briefly provisional (live QA: id A in the URL while history already showed
+ * final id B, replaced ~40 ms later), so an unconfirmed URL is not saved. Observed (T2): `mstk` appears 0.6-10.8 s
+ * after acceptance, `mtid` ~0.3-2.7 s later. The early `data-session-thread-id` is never used (Review fix 3).
  * @returns {Promise<string|null>}
  */
 export async function conversationUrl(page) {
-  return toConversationUrl(page.url());
+  const { url, shown, current } = await resolvedThread(page);
+  return shown && shown === current ? url : null;
+}
+
+// Thread Google resolves for the tab: address-bar conversation URL, its mtid, and the highlighted history entry's id.
+async function resolvedThread(page) {
+  const url = toConversationUrl(page.url());
+  const current = await page.locator(SEL.currentThread).first().getAttribute('data-thread-id', { timeout: 500 }).catch(() => null);
+  return { url, shown: url && threadOf(url), current };
 }
 
 const threadOf = (url) => new URL(url).searchParams.get('mtid');
@@ -116,9 +125,7 @@ export async function checkWritable(page, expectedUrl, { firstPrompt, timeoutMs 
   let turns = null;
   while (Date.now() < deadline) {
     if (await detectAttention(page)) return 'attention';
-    const shownUrl = toConversationUrl(page.url());
-    const shown = shownUrl && threadOf(shownUrl);
-    const current = await page.locator(SEL.currentThread).first().getAttribute('data-thread-id', { timeout: 500 }).catch(() => null);
+    const { shown, current } = await resolvedThread(page);
     turns = await readTurns(page).catch(() => null);
     if ((shown && shown !== want) || (current && current !== want)) return 'wrong_conversation';
     if (firstPrompt !== undefined && turns && turns.length && norm(turns[0].query) !== norm(firstPrompt)) return 'wrong_conversation';

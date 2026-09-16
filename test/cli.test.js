@@ -8,6 +8,7 @@ import path from 'node:path';
 // Fake playwright-core: real src/page.js runs against a stubbed page. STUB_RESOLVE is the URL a stored URL resolves to
 // (its mtid is the thread Google shows); STUB_TURNS are the turns shown. Prints "STUB sent" if a prompt is submitted.
 // STUB_SENT_URL is the page URL after the first send; STUB_EARLY_ID is the early data-session-thread-id.
+// STUB_CURRENT_ID overrides the highlighted history entry's data-thread-id ('' = none); default: the URL's mtid.
 const pwSrc = `const say = (s) => process.stdout.write('STUB ' + s + '\\n');
 const turns = JSON.parse(process.env.STUB_TURNS);
 let url = 'about:blank', loaded = false;
@@ -17,7 +18,7 @@ const page = {
   evaluate: async (x) => (typeof x === 'function' ? false : loaded ? turns : null),
   evaluateHandle: async () => { say('extracted'); return { asElement: () => null }; },
   locator: (sel) => ({ first() { return this; }, isVisible: async () => true, fill: async () => say('sent'), press: async () => {},
-    getAttribute: async () => (loaded && (/session-thread-id/.test(sel) ? process.env.STUB_EARLY_ID : /thread-id/.test(sel) && new URL(url).searchParams.get('mtid'))) || null }),
+    getAttribute: async () => (loaded && (/session-thread-id/.test(sel) ? process.env.STUB_EARLY_ID : /thread-id/.test(sel) && ('STUB_CURRENT_ID' in process.env ? process.env.STUB_CURRENT_ID : new URL(url).searchParams.get('mtid')))) || null }),
 };
 export const chromium = { connectOverCDP: async () => ({ on() {}, contexts: () => [{ newPage: async () => page }] }) };`;
 const pwHook = `data:text/javascript,${encodeURIComponent(`import { registerHooks } from 'node:module';
@@ -77,6 +78,28 @@ test('cli: quit before Google puts the final mtid in the URL saves nothing (earl
   assert.ok(r.out.includes('STUB sent'), r.out);
   assert.ok(r.out.includes('[this conversation is not saved yet]') && !r.out.includes('saved]'), `unsaved warning expected:\n${r.out}`);
   assert.ok(r.index.equals(index), 'no new entry; existing entries byte-identical');
+});
+
+// Live QA: the address-bar mtid can be provisional (id A) while history already highlights final id B; save only on equality.
+const SENT = gurl('AUtExfSSSSSSSSSSSSSSSSSSSSS', 'provisionalSSSS');
+for (const [label, current] of [['absent', ''], ['mismatched (provisional URL id)', 'finalSSSSSSSSSS']]) {
+  test(`cli: quit with an mstk+mtid URL but the highlighted history id ${label} saves nothing`, async () => {
+    const index = Buffer.from(JSON.stringify({ version: 1, last: 'a', sessions: { a: { url: A, createdAt: 'x', lastUsedAt: 'x' } } }, null, 2) + '\n');
+    const r = await runAim(['--name', 's'], { index, turns: [{ query: 'hello', text: '', signal: false }], line: 'hello',
+      env: { STUB_SENT_URL: SENT, STUB_CURRENT_ID: current }, done: (o) => o.includes('[waiting for Google to assign a conversation URL]') });
+    assert.equal(r.code, 0, r.out);
+    assert.ok(r.out.includes('STUB sent'), r.out);
+    assert.ok(r.out.includes('[this conversation is not saved yet]') && !r.out.includes('saved]'), `unsaved warning expected:\n${r.out}`);
+    assert.ok(r.index.equals(index), 'no new entry; existing entries byte-identical');
+  });
+}
+
+test('cli: an mstk+mtid URL whose mtid equals the highlighted history id is saved', async () => {
+  const r = await runAim(['--name', 's'], { turns: [{ query: 'hello', text: '', signal: false }], line: 'hello',
+    env: { STUB_SENT_URL: SENT, STUB_CURRENT_ID: 'provisionalSSSS' }, done: (o) => o.includes('[session s saved]') });
+  assert.equal(r.code, 0, r.out);
+  assert.ok(r.out.includes('[session s saved]') && !r.out.includes('not saved yet'), r.out);
+  assert.equal(JSON.parse(r.index).sessions.s.url, SENT);
 });
 
 test('cli: completion signal with a null extraction is reported incomplete, not silently idle', async () => {
