@@ -84,6 +84,8 @@ async function doSave() {
   const cur = index.sessions[name];
   if (cur?.url === found.url) return;
   if (cur && !cur.firstPrompt && found.provisional) return; // never replace a final URL with a provisional one
+  // A provisional entry without firstPrompt would fail resume identity; wait until send() sets it (quit warns unsaved).
+  if (found.provisional && !(cur?.firstPrompt ?? firstPrompt)) return;
   index.sessions[name] = { url: found.url, createdAt: cur?.createdAt ?? now, lastUsedAt: now };
   // ponytail: firstPrompt is an SRS schema addition for provisional URLs; T4 to confirm or replace.
   if (found.provisional) index.sessions[name].firstPrompt = cur?.firstPrompt ?? firstPrompt;
