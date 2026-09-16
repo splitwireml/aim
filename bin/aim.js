@@ -69,7 +69,7 @@ page.on('close', () => recover(`[Chrome tab closed / browser disconnected — /q
 browser.on('disconnected', () => recover(`[Chrome tab closed / browser disconnected — /quit, then aim -r ${name}]`));
 
 // Serialized: a ticker save in flight must not turn /quit's or turn-end's save into a no-op (seen live in T2 run s1).
-let inflight = null, firstPrompt;
+let inflight = null;
 async function saveUrl({ skipIfBusy = false } = {}) {
   if (inflight && skipIfBusy) return;
   while (inflight) await inflight;
@@ -78,17 +78,12 @@ async function saveUrl({ skipIfBusy = false } = {}) {
 }
 async function doSave() {
   if (!canSave) return;
-  const found = await P.conversationUrl(page).catch(() => null);
-  if (!found) return;
+  const url = await P.conversationUrl(page).catch(() => null); // final URL only (null until Google assigns mtid)
+  if (!url) return;
   const now = new Date().toISOString();
   const cur = index.sessions[name];
-  if (cur?.url === found.url) return;
-  if (cur && !cur.firstPrompt && found.provisional) return; // never replace a final URL with a provisional one
-  // A provisional entry without firstPrompt would fail resume identity; wait until send() sets it (quit warns unsaved).
-  if (found.provisional && !(cur?.firstPrompt ?? firstPrompt)) return;
-  index.sessions[name] = { url: found.url, createdAt: cur?.createdAt ?? now, lastUsedAt: now };
-  // ponytail: firstPrompt is an SRS schema addition for provisional URLs; T4 to confirm or replace.
-  if (found.provisional) index.sessions[name].firstPrompt = cur?.firstPrompt ?? firstPrompt;
+  if (cur?.url === url) return;
+  index.sessions[name] = { url, createdAt: cur?.createdAt ?? now, lastUsedAt: now };
   index.last = name;
   saveIndex(index);
   if (!saved) say(`[session ${name} saved]`);
@@ -122,7 +117,6 @@ async function turn(text) {
   }
   state = 'pending';
   const { turnId, delivered } = await P.send(page, text);
-  if (turnId.index === 0) firstPrompt = text;
   if (delivered !== 'yes') { await saveUrl(); return recover('[delivery uncertain — check with /open]'); }
   if (!saved) say('[waiting for Google to assign a conversation URL]');
   abort = new AbortController();

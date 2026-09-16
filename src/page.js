@@ -56,24 +56,14 @@ export function toConversationUrl(pageUrl) {
 }
 
 /**
- * Conversation URL for the tab, or null if not yet assigned.
- * Observed (T2): `mstk` appeared 0.6 s after acceptance in 1 of 4 first turns, and together with the footer
- * (completion) in the other 3; the final `mtid` follows ~0.3-2.7 s later. Reopening follows `mstk` only.
- * Until then the early `data-session-thread-id` fills `mtid`;
- * such a URL is provisional: its thread id is not the final one, so checkWritable cannot confirm it (fails closed).
- * @returns {Promise<{url: string, provisional: boolean} | null>}
+ * Final conversation URL for the tab, or null. Only a URL Google itself has put in the address bar with both `mstk`
+ * and `mtid` counts: that `mtid` is the final thread id (T2 section 1), so checkWritable can confirm it on resume.
+ * Observed (T2): `mstk` appears 0.6-10.8 s after acceptance, the final `mtid` ~0.3-2.7 s later. The early
+ * `data-session-thread-id` is not the thread id and is never used to build a URL (Review fix 3).
+ * @returns {Promise<string|null>}
  */
 export async function conversationUrl(page) {
-  const final = toConversationUrl(page.url());
-  if (final) return { url: final, provisional: false };
-  let u;
-  try { u = new URL(page.url()); } catch { return null; }
-  if (u.hostname !== 'www.google.com' || u.searchParams.get('udm') !== '50' || !u.searchParams.get('mstk')) return null;
-  const early = await page.locator('[data-session-thread-id]').first().getAttribute('data-session-thread-id', { timeout: 500 }).catch(() => null);
-  if (!early) return null;
-  u.searchParams.set('mtid', early);
-  const url = toConversationUrl(u.href);
-  return url ? { url, provisional: true } : null;
+  return toConversationUrl(page.url());
 }
 
 const threadOf = (url) => new URL(url).searchParams.get('mtid');
@@ -117,7 +107,7 @@ export async function detectAttention(page) {
  * Confirms the tab shows the conversation identified by expectedUrl and accepts follow-ups.
  * Identity (always required): the thread id Google resolves (URL mtid and the highlighted history entry) must equal
  * expectedUrl's mtid. firstPrompt, when given, is only an extra check on the first query, never a substitute:
- * two threads can share a first query. A provisional URL's mtid is not a thread id, so it fails closed.
+ * two threads can share a first query. A stored URL whose mtid is not a thread id fails closed.
  * @returns {Promise<'writable'|'wrong_conversation'|'not_writable'|'attention'>}
  */
 export async function checkWritable(page, expectedUrl, { firstPrompt, timeoutMs = 15000, pollMs = 250 } = {}) {
