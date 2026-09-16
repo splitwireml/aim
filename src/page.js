@@ -57,8 +57,9 @@ export function toConversationUrl(pageUrl) {
 
 /**
  * Conversation URL for the tab, or null if not yet assigned.
- * Observed: `mstk` appears ~0.2 s after the turn is accepted, the final `mtid` only after the answer completes.
- * Until then the early `data-session-thread-id` fills `mtid` (Google needs the parameter, and follows mstk);
+ * Observed (T2): `mstk` appeared 0.6 s after acceptance in 1 of 4 first turns, and together with the footer
+ * (completion) in the other 3; the final `mtid` follows ~0.3-2.7 s later. Reopening follows `mstk` only.
+ * Until then the early `data-session-thread-id` fills `mtid`;
  * such a URL is provisional: its thread id is not the final one, see checkWritable's firstPrompt.
  * @returns {Promise<{url: string, provisional: boolean} | null>}
  */
@@ -76,6 +77,7 @@ export async function conversationUrl(page) {
 }
 
 const threadOf = (url) => new URL(url).searchParams.get('mtid');
+const debug = process.env.AIM_DEBUG ? (...a) => console.error('[debug]', Date.now() % 1e6, ...a) : () => {};
 const norm = (s) => s.replace(/\s+/g, ' ').trim();
 
 // Runs in the page. Turns = query bubbles ("Copy <query>" outside answers) paired with the answer scope that
@@ -158,6 +160,7 @@ export async function reconcile(page) {
 export async function send(page, text, { confirmMs = 15000 } = {}) {
   const before = await readTurns(page).catch(() => null);
   const index = before ? before.length : 0;
+  debug('send index', index);
   try {
     if (!before) {
       await page.goto(`https://www.google.com/search?q=${encodeURIComponent(text)}&udm=50`, { waitUntil: 'domcontentloaded' });
@@ -172,6 +175,7 @@ export async function send(page, text, { confirmMs = 15000 } = {}) {
   const deadline = Date.now() + confirmMs;
   while (Date.now() < deadline) {
     const turns = await readTurns(page).catch(() => null);
+    debug('send confirm', turns && turns.length);
     if (turns && turns.length > index && norm(turns[index].query) === norm(text)) return { turnId: { index, text }, delivered: 'yes' };
     await page.waitForTimeout(200);
   }
@@ -188,6 +192,7 @@ export async function waitForTurn(page, turnId, { timeoutMs = 120000, quietMs = 
   let last = null, stableSince = 0;
   while (Date.now() < deadline && !signal?.aborted) {
     const t = await probeTurn(page, turnId);
+    debug('wait poll', turnId.index, t ? `signal=${t.signal} len=${t.text.length}` : 'no turn');
     if (t && t.text !== last) { last = t.text; stableSince = Date.now(); }
     if (t && t.signal && t.text && Date.now() - stableSince >= quietMs) return { status: 'complete', answer: await extractTurn(page, turnId) };
     await page.waitForTimeout(pollMs);

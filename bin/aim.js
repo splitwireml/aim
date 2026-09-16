@@ -59,6 +59,7 @@ say(`aim: session ${name} (${resuming ? 'resumed' : 'new'}) via ${cdp}`);
 
 let state = 'idle'; // idle | pending | recovery
 let saved = resuming;
+let canSave = !resuming; // a resumed tab is saved only after checkWritable says writable (FR-4.4)
 let shown = null; // markdown last printed
 let abort = null;
 const page = await P.openConversation(context, resuming ? index.sessions[name].url : undefined);
@@ -67,25 +68,29 @@ const recover = (msg) => { state = 'recovery'; say(msg); };
 page.on('close', () => recover(`[Chrome tab closed / browser disconnected — /quit, then aim -r ${name}]`));
 browser.on('disconnected', () => recover(`[Chrome tab closed / browser disconnected — /quit, then aim -r ${name}]`));
 
-let saving = false;
-async function saveUrl(firstPrompt) {
-  if (saving) return;
-  saving = true;
-  try {
-    const found = await P.conversationUrl(page).catch(() => null);
-    if (!found) return;
-    const now = new Date().toISOString();
-    const cur = index.sessions[name];
-    if (cur?.url === found.url) return;
-    if (cur && !cur.firstPrompt && found.provisional) return; // never replace a final URL with a provisional one
-    index.sessions[name] = { url: found.url, createdAt: cur?.createdAt ?? now, lastUsedAt: now };
-    // ponytail: firstPrompt is an SRS schema addition for provisional URLs; T4 to confirm or replace.
-    if (found.provisional) index.sessions[name].firstPrompt = cur?.firstPrompt ?? firstPrompt;
-    index.last = name;
-    saveIndex(index);
-    if (!saved) say(`[session ${name} saved]`);
-    saved = true;
-  } finally { saving = false; }
+// Serialized: a ticker save in flight must not turn /quit's or turn-end's save into a no-op (seen live in T2 run s1).
+let inflight = null, firstPrompt;
+async function saveUrl({ skipIfBusy = false } = {}) {
+  if (inflight && skipIfBusy) return;
+  while (inflight) await inflight;
+  inflight = doSave().finally(() => { inflight = null; });
+  return inflight;
+}
+async function doSave() {
+  if (!canSave) return;
+  const found = await P.conversationUrl(page).catch(() => null);
+  if (!found) return;
+  const now = new Date().toISOString();
+  const cur = index.sessions[name];
+  if (cur?.url === found.url) return;
+  if (cur && !cur.firstPrompt && found.provisional) return; // never replace a final URL with a provisional one
+  index.sessions[name] = { url: found.url, createdAt: cur?.createdAt ?? now, lastUsedAt: now };
+  // ponytail: firstPrompt is an SRS schema addition for provisional URLs; T4 to confirm or replace.
+  if (found.provisional) index.sessions[name].firstPrompt = cur?.firstPrompt ?? firstPrompt;
+  index.last = name;
+  saveIndex(index);
+  if (!saved) say(`[session ${name} saved]`);
+  saved = true;
 }
 
 function print(answer) {
@@ -100,7 +105,7 @@ if (resuming) {
   const r = await P.checkWritable(page, entry.url, { firstPrompt: entry.firstPrompt });
   if (r === 'attention') recover('[needs attention — run /open]');
   else if (r !== 'writable') { say('[session cannot be continued in Google — see AI Mode history, /open]'); state = 'blocked'; }
-  else { entry.lastUsedAt = new Date().toISOString(); index.last = name; saveIndex(index); await saveUrl(); }
+  else { canSave = true; entry.lastUsedAt = new Date().toISOString(); index.last = name; saveIndex(index); await saveUrl(); }
 }
 
 async function turn(text) {
@@ -115,22 +120,23 @@ async function turn(text) {
   }
   state = 'pending';
   const { turnId, delivered } = await P.send(page, text);
-  const firstPrompt = turnId.index === 0 ? text : undefined;
-  const ticker = setInterval(() => saveUrl(firstPrompt), 250);
-  if (delivered !== 'yes') { clearInterval(ticker); await saveUrl(firstPrompt); return recover('[delivery uncertain — check with /open]'); }
+  if (turnId.index === 0) firstPrompt = text;
+  if (delivered !== 'yes') { await saveUrl(); return recover('[delivery uncertain — check with /open]'); }
   if (!saved) say('[waiting for Google to assign a conversation URL]');
   abort = new AbortController();
   const { status, answer } = await P.waitForTurn(page, turnId, { timeoutMs: Number(process.env.AIM_TURN_TIMEOUT_MS) || 120000, signal: abort.signal });
   const interrupted = abort.signal.aborted;
   abort = null;
-  clearInterval(ticker);
-  await saveUrl(firstPrompt);
+  await saveUrl();
   if (saved) { index.sessions[name].lastUsedAt = new Date().toISOString(); index.last = name; saveIndex(index); }
   if (status === 'complete') { print(answer); state = 'idle'; return; }
   if (answer && !interrupted) print(answer);
   if (await P.detectAttention(page).catch(() => false)) return recover('[needs attention — run /open]');
   recover(interrupted ? '[stopped waiting locally — Google may still be answering; prompts resume when it is idle]' : '[incomplete — run /open]');
 }
+
+// Save early (FR-4.2): the URL can appear after a timeout or Ctrl-C, so poll for the whole process, not per turn.
+setInterval(() => saveUrl({ skipIfBusy: true }), 250);
 
 async function quit() {
   await saveUrl();
