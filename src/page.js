@@ -1,19 +1,17 @@
 // Google AI Mode adapter. The only module that knows Google's page (SRS 2.3, NFR-7).
-// Selectors below were observed live on 2026-09-16 (Chrome 152); see docs/evidence/T1.md.
-// T1 scope: connect, openConversation, send, waitForTurn, extract.
-// Not yet implemented (T2/T3): checkWritable, reconcile, conversationUrl, isConversationUrl, attention detection.
+// Selectors were observed live on 2026-09-16 (Chrome 152); see docs/evidence/T1.md and T2.md.
 import { chromium } from 'playwright-core';
 
 export const DEFAULT_CDP_URL = 'http://127.0.0.1:9222';
 
 const SEL = {
   turnRoot: '[data-xid="aim-mars-turn-root"]',
-  // One child per user turn: query bubble + answer. Old turns stay in place when a new one is appended.
-  turn: '[data-xid="aim-mars-turn-root"] > [data-tr-rsts]',
-  answer: '[data-scope-id="turn"] [data-container-id="main-col"]',
+  scope: '[data-scope-id="turn"]',
+  answer: '[data-container-id="main-col"]',
   // Footer with "Copy text"/feedback; inserted when the answer body is final (observed completion signal).
   footerCopy: '[data-xid="Gd7Hsc"] button[aria-label="Copy text"]',
   input: '[data-xid="aim-mars-input-plate"] textarea',
+  currentThread: '[data-xid="threads-list-root"] button[data-thread-id][aria-current="true"]',
 };
 
 export class ConnectError extends Error {}
@@ -37,79 +35,185 @@ export async function openConversation(context, url) {
   return page;
 }
 
+/**
+ * Conversation URL: `mstk` selects the thread (observed: a mismatched `mtid` is rewritten to mstk's thread),
+ * `mtid` is the thread id used to confirm identity. `q` is dropped so reopening never resubmits a prompt.
+ */
+export function isConversationUrl(url) {
+  let u;
+  try { u = new URL(url); } catch { return false; }
+  const p = u.searchParams;
+  return u.protocol === 'https:' && u.hostname === 'www.google.com' && u.pathname === '/search' &&
+    p.get('udm') === '50' && /^[\w-]{20,}$/.test(p.get('mstk') || '') && /^[\w-]{10,}$/.test(p.get('mtid') || '') && !p.has('q');
+}
+
+export function toConversationUrl(pageUrl) {
+  let u;
+  try { u = new URL(pageUrl); } catch { return null; }
+  const out = new URL('https://www.google.com/search?udm=50');
+  for (const k of ['mstk', 'mtid', 'csuir']) if (u.searchParams.has(k)) out.searchParams.set(k, u.searchParams.get(k));
+  return u.hostname === 'www.google.com' && u.searchParams.get('udm') === '50' && isConversationUrl(out.href) ? out.href : null;
+}
+
+/**
+ * Conversation URL for the tab, or null if not yet assigned.
+ * Observed: `mstk` appears ~0.2 s after the turn is accepted, the final `mtid` only after the answer completes.
+ * Until then the early `data-session-thread-id` fills `mtid` (Google needs the parameter, and follows mstk);
+ * such a URL is provisional: its thread id is not the final one, see checkWritable's firstPrompt.
+ * @returns {Promise<{url: string, provisional: boolean} | null>}
+ */
+export async function conversationUrl(page) {
+  const final = toConversationUrl(page.url());
+  if (final) return { url: final, provisional: false };
+  let u;
+  try { u = new URL(page.url()); } catch { return null; }
+  if (u.hostname !== 'www.google.com' || u.searchParams.get('udm') !== '50' || !u.searchParams.get('mstk')) return null;
+  const early = await page.locator('[data-session-thread-id]').first().getAttribute('data-session-thread-id', { timeout: 500 }).catch(() => null);
+  if (!early) return null;
+  u.searchParams.set('mtid', early);
+  const url = toConversationUrl(u.href);
+  return url ? { url, provisional: true } : null;
+}
+
+const threadOf = (url) => new URL(url).searchParams.get('mtid');
 const norm = (s) => s.replace(/\s+/g, ' ').trim();
 
-// Turn containers and their query text ("Copy <query>" label on the query bubble).
-function readTurns(page) {
-  return page.$$eval(SEL.turn, (els) => els.map((el) => {
-    const b = el.querySelector('button[aria-label^="Copy "]:not([aria-label="Copy text"])');
-    return b ? b.getAttribute('aria-label').slice(5) : null;
-  })).catch(() => []);
+// Runs in the page. Turns = query bubbles ("Copy <query>" outside answers) paired with the answer scope that
+// contains the bubble (restored threads) or follows it before the next bubble (turns added in this tab).
+function readTurnsInPage(sel) {
+  const root = document.querySelector(sel.turnRoot);
+  if (!root) return null;
+  const qs = [...root.querySelectorAll('button[aria-label^="Copy "]')]
+    .filter((b) => b.getAttribute('aria-label') !== 'Copy text' && !b.closest('[data-container-id]'));
+  const scopes = [...root.querySelectorAll(sel.scope)];
+  const after = (a, b) => !!(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
+  return qs.map((q, i) => {
+    const next = qs[i + 1];
+    const scope = scopes.find((s) => s.contains(q) || (after(q, s) && !(next && (s.contains(next) || after(next, s)))));
+    const answer = scope && scope.querySelector(sel.answer);
+    const footer = scope && scope.querySelector(sel.footerCopy);
+    return { query: q.getAttribute('aria-label').slice(5), answer, text: answer ? answer.innerText : '', signal: !!footer && footer.checkVisibility() };
+  });
+}
+
+// Passed as an expression string: nested eval inside Google's page could be blocked by its CSP.
+const turnsExpr = (tail) => `(${readTurnsInPage})(${JSON.stringify(SEL)})${tail}`;
+
+async function readTurns(page) {
+  return page.evaluate(turnsExpr('?.map(({ query, text, signal }) => ({ query, text, signal }))'));
+}
+
+/** Login, consent, CAPTCHA or unusual-traffic page. URL/markup patterns are not verified live (see T2.md). */
+export async function detectAttention(page) {
+  let u;
+  try { u = new URL(page.url()); } catch { return false; }
+  if (/^(accounts|consent)\.google\./.test(u.hostname) || u.pathname.startsWith('/sorry')) return true;
+  return page.evaluate(() => !!document.querySelector('iframe[src*="recaptcha"], form#captcha-form, form[action*="/sorry"]')).catch(() => false);
+}
+
+/**
+ * Confirms the tab shows the conversation identified by expectedUrl and accepts follow-ups.
+ * Identity: the thread id Google resolves (URL mtid and the highlighted history entry) must equal expectedUrl's mtid.
+ * For a provisional URL (saved before Google assigned the final id) pass firstPrompt: the resolved thread's
+ * first query must equal it instead.
+ * @returns {Promise<'writable'|'wrong_conversation'|'not_writable'|'attention'>}
+ */
+export async function checkWritable(page, expectedUrl, { firstPrompt, timeoutMs = 15000, pollMs = 250 } = {}) {
+  const want = threadOf(expectedUrl);
+  const deadline = Date.now() + timeoutMs;
+  let turns = null;
+  while (Date.now() < deadline) {
+    if (await detectAttention(page)) return 'attention';
+    const shownUrl = toConversationUrl(page.url());
+    const shown = shownUrl && threadOf(shownUrl);
+    const current = await page.locator(SEL.currentThread).first().getAttribute('data-thread-id', { timeout: 500 }).catch(() => null);
+    turns = await readTurns(page).catch(() => null);
+    if (firstPrompt === undefined) {
+      if ((shown && shown !== want) || (current && current !== want)) return 'wrong_conversation';
+    } else if (turns && turns.length && norm(turns[0].query) !== norm(firstPrompt)) {
+      return 'wrong_conversation';
+    }
+    const same = firstPrompt === undefined ? shown === want && current === want : shown && current === shown;
+    if (turns && turns.length && same && (await page.locator(SEL.input).isVisible())) return 'writable';
+    await page.waitForTimeout(pollMs);
+  }
+  return turns && turns.length ? 'not_writable' : 'wrong_conversation'; // no turns: fresh chat
+}
+
+/**
+ * After an unconfirmed turn: 'generating' while the last turn has no completion footer.
+ * @returns {Promise<'idle'|'generating'|'attention'>}
+ */
+export async function reconcile(page) {
+  if (await detectAttention(page)) return 'attention';
+  const turns = await readTurns(page);
+  return turns && turns.length && !turns[turns.length - 1].signal ? 'generating' : 'idle';
 }
 
 /**
  * Submits text. First turn (no AI Mode thread in the tab) navigates to the udm=50 URL; later turns type into the input.
- * Delivery is 'yes' only when a new turn container carrying exactly this query appears.
+ * Delivery is 'yes' only when a new turn carrying exactly this query appears at the expected index.
  * @returns {Promise<{turnId: {index: number, text: string}, delivered: 'yes'|'uncertain'}>}
  */
 export async function send(page, text, { confirmMs = 15000 } = {}) {
-  const before = (await page.$(SEL.turnRoot)) ? await readTurns(page) : null;
+  const before = await readTurns(page).catch(() => null);
   const index = before ? before.length : 0;
-  if (!before) {
-    await page.goto(`https://www.google.com/search?q=${encodeURIComponent(text)}&udm=50`, { waitUntil: 'domcontentloaded' });
-  } else {
-    const input = page.locator(SEL.input);
-    await input.fill(text);
-    await input.press('Enter');
+  try {
+    if (!before) {
+      await page.goto(`https://www.google.com/search?q=${encodeURIComponent(text)}&udm=50`, { waitUntil: 'domcontentloaded' });
+    } else {
+      const input = page.locator(SEL.input);
+      await input.fill(text);
+      await input.press('Enter');
+    }
+  } catch {
+    return { turnId: { index, text }, delivered: 'uncertain' };
   }
   const deadline = Date.now() + confirmMs;
   while (Date.now() < deadline) {
-    const turns = await readTurns(page);
-    if (turns.length > index && turns[index] !== null && norm(turns[index]) === norm(text)) {
-      return { turnId: { index, text }, delivered: 'yes' };
-    }
+    const turns = await readTurns(page).catch(() => null);
+    if (turns && turns.length > index && norm(turns[index].query) === norm(text)) return { turnId: { index, text }, delivered: 'yes' };
     await page.waitForTimeout(200);
   }
   return { turnId: { index, text }, delivered: 'uncertain' };
 }
 
 /**
- * Waits for the turn's completion signal (footer "Copy text" button rendered in that turn),
- * then for the answer text to stay unchanged for quietMs. Quiet text alone never completes a turn.
- * @returns {Promise<{status: 'complete'|'incomplete', answer?: {markdown, citations}}>}
+ * Waits for the turn's completion signal (footer "Copy text" button in that turn), then for the answer text
+ * to stay unchanged for quietMs. Quiet text alone never completes a turn. `signal` aborts local waiting only.
+ * @returns {Promise<{status: 'complete'|'incomplete', answer?: {markdown, citations, unresolved}}>}
  */
-export async function waitForTurn(page, turnId, { timeoutMs = 120000, quietMs = 1500, pollMs = 250 } = {}) {
+export async function waitForTurn(page, turnId, { timeoutMs = 120000, quietMs = 1500, pollMs = 250, signal } = {}) {
   const deadline = Date.now() + timeoutMs;
   let last = null, stableSince = 0;
-  while (Date.now() < deadline) {
-    const s = await probeTurn(page, turnId);
-    if (s && s.text !== last) { last = s.text; stableSince = Date.now(); }
-    if (s && s.signal && s.text && Date.now() - stableSince >= quietMs) {
-      return { status: 'complete', answer: await extractTurn(page, turnId) };
-    }
+  while (Date.now() < deadline && !signal?.aborted) {
+    const t = await probeTurn(page, turnId);
+    if (t && t.text !== last) { last = t.text; stableSince = Date.now(); }
+    if (t && t.signal && t.text && Date.now() - stableSince >= quietMs) return { status: 'complete', answer: await extractTurn(page, turnId) };
     await page.waitForTimeout(pollMs);
   }
-  return { status: 'incomplete', answer: (await extractTurn(page, turnId)) || undefined };
+  return { status: 'incomplete', answer: (await extractTurn(page, turnId).catch(() => null)) || undefined };
 }
 
-// Attribution: only the container at turnId.index whose query equals turnId.text is inspected.
+// Attribution: only the turn at turnId.index whose query equals turnId.text is inspected.
 async function probeTurn(page, { index, text }) {
-  const el = page.locator(SEL.turn).nth(index);
-  if (!(await el.count())) return null;
-  const query = await el.locator('button[aria-label^="Copy "]:not([aria-label="Copy text"])').first().getAttribute('aria-label', { timeout: 1000 }).catch(() => null);
-  if (!query || norm(query.slice(5)) !== norm(text)) return null;
-  return el.evaluate((t, sel) => {
-    const a = t.querySelector(sel.answer);
-    const f = t.querySelector(sel.footerCopy);
-    return { text: a ? a.innerText : '', signal: !!f && f.checkVisibility() };
-  }, SEL);
+  const turns = await readTurns(page).catch(() => null);
+  const t = turns && turns[index];
+  return t && norm(t.query) === norm(text) ? t : null;
 }
 
 async function extractTurn(page, turnId) {
   if (!(await probeTurn(page, turnId))) return null;
-  const answer = page.locator(SEL.turn).nth(turnId.index).locator(SEL.answer);
-  if (!(await answer.count())) return null;
-  return answer.evaluate(extract);
+  const handle = await page.evaluateHandle(turnsExpr(`?.[${Number(turnId.index)}]?.answer ?? null`));
+  const el = handle.asElement();
+  return el ? el.evaluate(extract) : null;
+}
+
+/** Latest turn's answer, if complete; used after recovery. */
+export async function latestAnswer(page) {
+  const turns = await readTurns(page).catch(() => null);
+  if (!turns || !turns.length || !turns[turns.length - 1].signal) return null;
+  return extractTurn(page, { index: turns.length - 1, text: turns[turns.length - 1].query });
 }
 
 /**

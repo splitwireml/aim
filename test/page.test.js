@@ -2,7 +2,7 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { chromium } from 'playwright-core';
-import { extract, connect, ConnectError } from '../src/page.js';
+import { extract, connect, ConnectError, isConversationUrl, toConversationUrl } from '../src/page.js';
 
 // Installed Chrome, fresh temporary profile, JS disabled: never the live AI Mode tab (SRS T-1).
 let browser, page;
@@ -38,4 +38,17 @@ test('extract: live-captured answer keeps structure, citation positions and repe
 test('connect: refuses non-localhost CDP endpoints before attaching', async () => {
   await assert.rejects(connect('http://192.168.1.5:9222'), ConnectError);
   await assert.rejects(connect('not a url'), ConnectError);
+});
+
+test('conversation URL: keeps thread token and id, drops the prompt so reopening never resubmits', () => {
+  const mstk = 'AUtExf' + 'x'.repeat(40);
+  const live = `https://www.google.com/search?q=hello+there&udm=50&mstk=${mstk}&csuir=1&mtid=abcDEF123-_xyz`;
+  const url = toConversationUrl(live);
+  assert.equal(url, `https://www.google.com/search?udm=50&mstk=${mstk}&mtid=abcDEF123-_xyz&csuir=1`);
+  assert.ok(isConversationUrl(url));
+  assert.equal(toConversationUrl('https://www.google.com/search?q=hello&udm=50'), null, 'initial udm=50 search URL is not stored');
+  assert.equal(toConversationUrl(`https://www.google.com/search?udm=50&mtid=abcDEF123-_xyz`), null, 'mtid alone opened a fresh chat live');
+  for (const bad of [live, `http://www.google.com/search?udm=50&mstk=${mstk}&mtid=abcDEF123`, `https://evil.example/search?udm=50&mstk=${mstk}&mtid=abcDEF123`, `https://www.google.com/search?udm=39&mstk=${mstk}&mtid=abcDEF123`, 'nope']) {
+    assert.equal(isConversationUrl(bad), false, bad);
+  }
 });

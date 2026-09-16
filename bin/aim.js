@@ -1,32 +1,156 @@
 #!/usr/bin/env node
-// T1 probe entry: aim "<question>" ["<follow-up>" ...]. The REPL, sessions and lock arrive in T4/T5.
-import { connect, openConversation, send, waitForTurn, ConnectError } from '../src/page.js';
+// Minimal M0 CLI (T2): named sessions, REPL, pending/recovery. T4/T5 harden validation, lock and output.
+import { parseArgs } from 'node:util';
+import readline from 'node:readline';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import * as P from '../src/page.js';
 
 // Strip ANSI/OSC escapes and C0/C1 controls except \n and \t (FR-3.10).
-const clean = (s) => s.replace(/\x1b\][^\x07\x1b]*(\x07|\x1b\\)?|\x1b\[[0-?]*[ -/]*[@-~]|\x1b[@-_]|[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, '');
+const clean = (s) => String(s).replace(/\x1b\][^\x07\x1b]*(\x07|\x1b\\)?|\x1b\[[0-?]*[ -/]*[@-~]|\x1b[@-_]|[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, '');
+const say = (s) => process.stdout.write(s + '\n');
+const HELP = 'commands: /open /quit /help (Ctrl-D quits; Ctrl-C stops waiting locally)';
+const NAME = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 
-const prompts = process.argv.slice(2);
-if (!prompts.length) { console.error('usage: aim "<question>" ["<follow-up>" ...]'); process.exit(1); }
+// ponytail: no lock and shallow index validation; T4 adds the lock and full FR-4.9 checks.
+const indexPath = path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'aim', 'sessions.json');
+function loadIndex() {
+  let raw;
+  try { raw = fs.readFileSync(indexPath, 'utf8'); } catch (e) { if (e.code === 'ENOENT') return { version: 1, last: null, sessions: {} }; throw e; }
+  let idx;
+  try { idx = JSON.parse(raw); } catch (e) { console.error(`corrupt session index ${indexPath}: ${e.message}`); process.exit(3); }
+  if (idx?.version !== 1 || typeof idx.sessions !== 'object' || !idx.sessions) { console.error(`corrupt session index ${indexPath}: unsupported shape`); process.exit(3); }
+  return idx;
+}
+function saveIndex(idx) {
+  fs.mkdirSync(path.dirname(indexPath), { recursive: true });
+  const tmp = `${indexPath}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(idx, null, 2) + '\n');
+  fs.renameSync(tmp, indexPath);
+}
 
-let context;
-try { ({ context } = await connect()); } catch (e) {
-  if (!(e instanceof ConnectError)) throw e;
-  console.error(`${e.message}\nStart the dedicated Chrome profile with --remote-debugging-port=9222 (or set AIM_CDP_URL).`);
+const { values } = parseArgs({ options: { name: { type: 'string' }, continue: { type: 'boolean', short: 'c' }, resume: { type: 'string', short: 'r' }, help: { type: 'boolean' } } });
+if (values.help) { say('usage: aim [--name <name>] | -c | -r <name>\n' + HELP); process.exit(0); }
+
+const index = loadIndex();
+let name = values.resume ?? (values.continue ? index.last : values.name);
+const resuming = Boolean(values.resume || values.continue);
+if (resuming && !index.sessions[name]) { console.error(values.continue ? 'no session to continue' : `unknown session: ${name}`); process.exit(1); }
+if (!resuming) {
+  if (name && index.sessions[name]) { console.error(`session already exists: ${name}`); process.exit(1); }
+  if (name && !NAME.test(name)) { console.error(`invalid session name: ${name}`); process.exit(1); }
+  if (!name) {
+    const d = new Date(), p2 = (n) => String(n).padStart(2, '0');
+    const base = `${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}-${p2(d.getHours())}${p2(d.getMinutes())}`;
+    name = base;
+    for (let i = 2; index.sessions[name]; i++) name = `${base}-${i}`;
+  }
+}
+
+const cdp = process.env.AIM_CDP_URL || P.DEFAULT_CDP_URL;
+let browser, context;
+try { ({ browser, context } = await P.connect(cdp)); } catch (e) {
+  if (!(e instanceof P.ConnectError)) throw e;
+  console.error(`${clean(e.message)}\nStart the dedicated Chrome profile with --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 (or set AIM_CDP_URL).`);
   process.exit(2);
 }
-const page = await openConversation(context);
-for (const text of prompts) {
-  const t0 = Date.now();
-  const { turnId, delivered } = await send(page, text);
-  if (delivered !== 'yes') { console.log('[delivery uncertain — check with /open]'); process.exit(0); }
-  const t1 = Date.now();
-  const { status, answer } = await waitForTurn(page, turnId, { timeoutMs: Number(process.env.AIM_TURN_TIMEOUT_MS) || 120000 });
-  console.error(`[turn ${turnId.index}: delivered ${t1 - t0} ms, ${status} after ${Date.now() - t1} ms]`);
-  if (answer) {
-    console.log(clean(answer.markdown));
-    if (answer.citations.length) console.log('\nSources\n' + answer.citations.map((c) => clean(`[${c.marker}] ${c.title} — ${c.url}`)).join('\n'));
-  }
-  if (status !== 'complete') { console.log('[incomplete — run /open]'); process.exit(0); }
-  console.log();
+say(`aim: session ${name} (${resuming ? 'resumed' : 'new'}) via ${cdp}`);
+
+let state = 'idle'; // idle | pending | recovery
+let saved = resuming;
+let shown = null; // markdown last printed
+let abort = null;
+const page = await P.openConversation(context, resuming ? index.sessions[name].url : undefined);
+
+const recover = (msg) => { state = 'recovery'; say(msg); };
+page.on('close', () => recover(`[Chrome tab closed / browser disconnected — /quit, then aim -r ${name}]`));
+browser.on('disconnected', () => recover(`[Chrome tab closed / browser disconnected — /quit, then aim -r ${name}]`));
+
+let saving = false;
+async function saveUrl(firstPrompt) {
+  if (saving) return;
+  saving = true;
+  try {
+    const found = await P.conversationUrl(page).catch(() => null);
+    if (!found) return;
+    const now = new Date().toISOString();
+    const cur = index.sessions[name];
+    if (cur?.url === found.url) return;
+    if (cur && !cur.firstPrompt && found.provisional) return; // never replace a final URL with a provisional one
+    index.sessions[name] = { url: found.url, createdAt: cur?.createdAt ?? now, lastUsedAt: now };
+    // ponytail: firstPrompt is an SRS schema addition for provisional URLs; T4 to confirm or replace.
+    if (found.provisional) index.sessions[name].firstPrompt = cur?.firstPrompt ?? firstPrompt;
+    index.last = name;
+    saveIndex(index);
+    if (!saved) say(`[session ${name} saved]`);
+    saved = true;
+  } finally { saving = false; }
 }
-process.exit(0); // detach only; Chrome and the tab stay open (FR-6.2)
+
+function print(answer) {
+  if (!answer) return;
+  shown = answer.markdown;
+  say(clean(answer.markdown));
+  if (answer.citations.length) say('\nSources\n' + answer.citations.map((c) => clean(`[${c.marker}] ${c.title} — ${c.url}`)).join('\n'));
+}
+
+if (resuming) {
+  const entry = index.sessions[name];
+  const r = await P.checkWritable(page, entry.url, { firstPrompt: entry.firstPrompt });
+  if (r === 'attention') recover('[needs attention — run /open]');
+  else if (r !== 'writable') { say('[session cannot be continued in Google — see AI Mode history, /open]'); state = 'blocked'; }
+  else { entry.lastUsedAt = new Date().toISOString(); index.last = name; saveIndex(index); await saveUrl(); }
+}
+
+async function turn(text) {
+  if (state === 'blocked') return say('[session cannot be continued in Google — see AI Mode history, /open]');
+  if (state === 'recovery') {
+    state = 'pending'; // no second prompt while reconciling
+    const r = await P.reconcile(page).catch(() => 'generating');
+    if (r !== 'idle') { state = 'recovery'; return say(r === 'attention' ? '[needs attention — run /open]' : '[Google is still answering — wait or /open]'); }
+    const latest = await P.latestAnswer(page);
+    if (latest && latest.markdown !== shown) print(latest);
+    state = 'idle';
+  }
+  state = 'pending';
+  const { turnId, delivered } = await P.send(page, text);
+  const firstPrompt = turnId.index === 0 ? text : undefined;
+  const ticker = setInterval(() => saveUrl(firstPrompt), 250);
+  if (delivered !== 'yes') { clearInterval(ticker); await saveUrl(firstPrompt); return recover('[delivery uncertain — check with /open]'); }
+  if (!saved) say('[waiting for Google to assign a conversation URL]');
+  abort = new AbortController();
+  const { status, answer } = await P.waitForTurn(page, turnId, { timeoutMs: Number(process.env.AIM_TURN_TIMEOUT_MS) || 120000, signal: abort.signal });
+  const interrupted = abort.signal.aborted;
+  abort = null;
+  clearInterval(ticker);
+  await saveUrl(firstPrompt);
+  if (saved) { index.sessions[name].lastUsedAt = new Date().toISOString(); index.last = name; saveIndex(index); }
+  if (status === 'complete') { print(answer); state = 'idle'; return; }
+  if (answer && !interrupted) print(answer);
+  if (await P.detectAttention(page).catch(() => false)) return recover('[needs attention — run /open]');
+  recover(interrupted ? '[stopped waiting locally — Google may still be answering; prompts resume when it is idle]' : '[incomplete — run /open]');
+}
+
+async function quit() {
+  await saveUrl();
+  if (!saved) say('[this conversation is not saved yet]');
+  process.exit(0); // detach only; Chrome and the tab stay open (FR-6.2)
+}
+
+const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: process.stdin.isTTY });
+const onInterrupt = () => { if (abort) abort.abort(); else say('[use /quit or Ctrl-D to exit]'); };
+rl.on('SIGINT', onInterrupt);
+process.on('SIGINT', onInterrupt);
+process.on('SIGTERM', quit);
+rl.on('close', quit);
+rl.on('line', async (line) => {
+  const text = line.trim();
+  if (!text) return;
+  if (text === '/quit') return quit();
+  if (text === '/help') return say(HELP);
+  if (text === '/open') return page.bringToFront().catch(() => say('[tab unavailable]'));
+  if (text.startsWith('/')) return say(`[unknown command: ${clean(text.split(/\s/)[0])}]`);
+  if (state === 'pending') return say('[waiting for answer]');
+  try { await turn(text); } catch (e) { recover(`[error: ${clean(e.message.split('\n')[0])} — /open]`); }
+});
