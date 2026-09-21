@@ -97,6 +97,34 @@ If reopening is refused, use `/open` and continue in Google, or select the inten
 
 During an answer, additional questions are rejected, not queued. After an interruption, retry once Google finishes; the tool checks that it is ready. A sign-in or consent message needs your attention in a visible browser (`--headed`). Sign-in detection has controlled checks, but the complete signed-out workflow remains unverified.
 
+## Node.js SDK
+
+Install this checkout in another Node.js project with `npm install /absolute/path/to/aim` (the package is not published to npm). JavaScript and TypeScript use the same API:
+
+```js
+import { AimSession } from 'aim';
+
+const session = await AimSession.create();
+try {
+  const answer = await session.ask('What is the capital of France?');
+  console.log(answer.markdown);
+  console.log(answer.citations); // [{ marker, title, url }]
+
+  const followUp = await session.ask('What is its population?');
+  console.log(followUp.markdown);
+} finally {
+  await session.close();
+}
+```
+
+Each object owns one live conversation. Keep it open for follow-ups. `create()` starts headless Chrome with the same dedicated profile as the CLI; sign in first using `npm start -- --headed`, then quit the CLI before using the SDK. Options are `profile`, `headless`, `executablePath`, `maxTabs` (default 1), `cdpUrl` (localhost only), and `timeoutMs` (default 120000). The browser/profile environment variables described above also apply; `timeoutMs` is set through the SDK options. Use distinct profiles for independent managed sessions.
+
+`ask()` returns `{ markdown, citations, unresolved }` only after a complete answer. `unresolved` counts visible citation chips without an extractable source. Await each question before asking another. `ask(question, { timeoutMs, signal })` supports a per-answer timeout and an `AbortSignal`. The timeout covers answer waiting; submission and readiness checks take additional time. Cancellation stops local waiting, so Google may continue generating.
+
+Handle `AimError` using its `code`: `BUSY`, `ATTENTION`, `CONVERSATION_CHANGED`, `DELIVERY_UNCERTAIN`, `ABORTED`, `INCOMPLETE`, or `CLOSED`. An incomplete/interrupted response can include `error.answer` with partial content. Invalid arguments throw `TypeError`; a signal already aborted before submission throws its abort reason. Browser/connection failures may also propagate. Questions are never automatically retried. After an interruption, the next `ask()` checks that Google is ready before submitting.
+
+`close()` is safe to repeat and supports `await using` through `Symbol.asyncDispose`. It shuts down a managed browser. With `cdpUrl`, it closes only this session's tab and disconnects, leaving the external browser and other tabs running. Closing during a question may interrupt it. SDK sessions do not write the CLI session index or support reopening after close; keep the object alive to retain context. The existing Google/browser limitations still apply.
+
 ## Limits
 
 - Exiting closes the conversation tab by default, including unfinished or unsaved conversations. Use an external visible browser with `--keep-tab` when the live tab must survive exit.

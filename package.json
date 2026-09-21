@@ -3,6 +3,12 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/sdk.d.ts",
+      "import": "./src/sdk.js"
+    }
+  },
   "scripts": {
     "start": "node bin/aim.js",
     "test": "node --test"
