@@ -30,8 +30,11 @@ function saveIndex(idx) {
   fs.renameSync(tmp, indexPath);
 }
 
-const { values } = parseArgs({ options: { name: { type: 'string' }, url: { type: 'string' }, continue: { type: 'boolean', short: 'c' }, resume: { type: 'string', short: 'r' }, help: { type: 'boolean' } } });
-if (values.help) { say("usage: aim [--name <name>] | --url <google-history-url> [--name <name>] | -c | -r <name>\nimport: aim --url 'https://www.google.com/search?udm=50&mstk=…&mtid=…' [--name <name>]\n" + HELP); process.exit(0); }
+const { values } = parseArgs({ options: { name: { type: 'string' }, url: { type: 'string' }, continue: { type: 'boolean', short: 'c' }, resume: { type: 'string', short: 'r' }, help: { type: 'boolean' }, headed: { type: 'boolean' }, profile: { type: 'string' }, 'max-tabs': { type: 'string' }, 'keep-tab': { type: 'boolean' } } });
+if (values.help) { say("usage: aim [--name <name>] | --url <google-history-url> [--name <name>] | -c | -r <name>\nbrowser: headless by default; --headed --profile <directory> --max-tabs <n> (default 1)\nexternal browser: AIM_CDP_URL=<localhost URL>; --keep-tab preserves its conversation tab on exit\nimport: aim --url 'https://www.google.com/search?udm=50&mstk=…&mtid=…' [--name <name>]\n" + HELP); process.exit(0); }
+let maxTabs;
+try { maxTabs = P.tabLimit(values['max-tabs'] ?? process.env.AIM_MAX_TABS ?? 1); }
+catch (e) { console.error(e.message); process.exit(1); }
 const importing = values.url !== undefined;
 if (importing && (values.continue || values.resume)) { console.error('--url cannot be combined with --continue or --resume'); process.exit(1); }
 const importUrl = importing ? P.toConversationUrl(values.url) : null;
@@ -53,14 +56,22 @@ if (!resuming) {
 }
 const expectedUrl = resuming ? index.sessions[name].url : importUrl;
 
-const cdp = process.env.AIM_CDP_URL || P.DEFAULT_CDP_URL;
-let browser, context;
-try { ({ browser, context } = await P.connect(cdp)); } catch (e) {
-  if (!(e instanceof P.ConnectError)) throw e;
-  console.error(`${clean(e.message)}\nStart the dedicated Chrome profile with --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 (or set AIM_CDP_URL).`);
+const cdp = process.env.AIM_CDP_URL;
+if (values['keep-tab'] && !cdp) { console.error('--keep-tab requires an external browser via AIM_CDP_URL'); process.exit(1); }
+const profile = path.resolve(values.profile || process.env.AIM_PROFILE_DIR || path.join(path.dirname(indexPath), 'chrome'));
+if (cdp && (values.headed || values.profile || process.env.AIM_PROFILE_DIR || process.env.AIM_BROWSER_EXECUTABLE)) {
+  console.error('Unset AIM_CDP_URL to use managed browser/profile options.'); process.exit(1);
+}
+let browser, context, page;
+try {
+  ({ browser, context } = cdp ? await P.connect(cdp) : await P.launch({ profile, headless: !values.headed, maxTabs, executablePath: process.env.AIM_BROWSER_EXECUTABLE }));
+  page = await P.openConversation(context, expectedUrl || (!cdp && values.headed ? 'https://www.google.com/search?udm=50' : undefined), { maxTabs, reuseBlank: !cdp });
+} catch (e) {
+  if (!cdp) await context?.close().catch(() => {});
+  console.error(`${clean(e.message)}\n${cdp ? 'Check the dedicated localhost CDP browser and --max-tabs.' : 'Install Google Chrome (or set AIM_BROWSER_EXECUTABLE); use --headed to sign in. Close any other browser using this AIM profile.'}`);
   process.exit(2);
 }
-say(`aim: session ${name} (${resuming ? 'resumed' : importing ? 'import' : 'new'}) via ${cdp}`);
+say(`aim: session ${name} (${resuming ? 'resumed' : importing ? 'import' : 'new'}) via ${cdp || (values.headed ? 'managed browser (visible)' : 'managed browser (headless)')}; max tabs ${maxTabs}`);
 if (!resuming && !importing) say('[warning: reopening this session may be unavailable; import its Google AI Mode history URL with --url]');
 
 let state = 'idle'; // idle | pending | recovery
@@ -68,11 +79,12 @@ let saved = resuming;
 let canSave = !expectedUrl; // restored/imported tabs are saved only after checkWritable says writable (FR-4.4)
 let shown = null; // markdown last printed
 let abort = null;
-const page = await P.openConversation(context, expectedUrl || undefined);
+let quitting = false;
 
 const recover = (msg) => { state = 'recovery'; say(msg); };
-page.on('close', () => recover(`[Chrome tab closed / browser disconnected — /quit, then aim -r ${name}]`));
-browser.on('disconnected', () => recover(`[Chrome tab closed / browser disconnected — /quit, then aim -r ${name}]`));
+const disconnected = () => { if (!quitting) recover(`[Browser tab closed / browser disconnected — /quit, then aim -r ${name}]`); };
+page.on('close', disconnected);
+browser.on('disconnected', disconnected);
 
 // Serialized: a ticker save in flight must not turn /quit's or turn-end's save into a no-op (seen live in T2 run s1).
 let inflight = null;
@@ -174,12 +186,27 @@ async function turn(text) {
 }
 
 // Save early (FR-4.2): the URL can appear after a timeout or Ctrl-C, so poll for the whole process, not per turn.
-setInterval(() => saveUrl({ skipIfBusy: true }), 250);
+const ticker = setInterval(() => saveUrl({ skipIfBusy: true }), 250);
 
 async function quit() {
-  await saveUrl();
-  if (!saved) say('[this conversation is not saved yet]');
-  process.exit(0); // detach only; Chrome and the tab stay open (FR-6.2)
+  if (quitting) return;
+  quitting = true;
+  clearInterval(ticker);
+  try {
+    await saveUrl();
+    if (!saved) say('[this conversation is not saved yet]');
+  } catch (e) {
+    // Keep the live conversation available when recording it failed.
+    quitting = false;
+    console.error(`[could not save session: ${clean(e.message)}; browser left open]`);
+    return;
+  }
+  if ((!cdp || !values['keep-tab']) && (state === 'pending' || state === 'recovery')) say('[closing the conversation tab; an unfinished answer may be interrupted]');
+  try {
+    if (!cdp) await context.close();
+    else if (!values['keep-tab']) await page.close();
+  } catch (e) { console.error(`[browser cleanup failed: ${clean(e.message)}]`); process.exit(2); }
+  process.exit(0); // Never close an externally owned browser or its other tabs.
 }
 
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: process.stdin.isTTY });
@@ -193,7 +220,10 @@ rl.on('line', async (line) => {
   if (!text) return;
   if (text === '/quit') return quit();
   if (text === '/help') return say(HELP);
-  if (text === '/open') return page.bringToFront().catch(() => say('[tab unavailable]'));
+  if (text === '/open') {
+    if (!cdp && !values.headed) return say('[headless browser: /quit, then restart with --headed and the same profile; import from Google history if resume fails]');
+    return page.bringToFront().catch(() => say('[tab unavailable]'));
+  }
   if (text.startsWith('/')) return say(`[unknown command: ${clean(text.split(/\s/)[0])}]`);
   if (state === 'pending') return say('[waiting for answer]');
   try { await turn(text); } catch (e) { recover(`[error: ${clean(e.message.split('\n')[0])} — /open]`); }

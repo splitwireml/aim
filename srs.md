@@ -1,3 +1,5 @@
+> Browser lifecycle update (2026-09-21): the current efficiency request supersedes the original attach-only/visible-browser requirements below. AIM now defaults to a managed headless Chrome with a native persistent profile and tab cap; explicit CDP supports external browsers including experimental Obscura. Exit closes the AIM tab unless external `--keep-tab` is selected. See README for current behavior.
+
 # SRS: `aim` — a terminal client for Google AI Mode
 
 > **Scope update, 2026-09-21:** The owner accepted the [limited personal tool](README.md) after the restoration investigation. This document retains the broader original requirements; unsupported requirements and the original M0 gate are not claimed as passed.

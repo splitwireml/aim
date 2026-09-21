@@ -7,7 +7,7 @@ import { extract, connect, ConnectError, isConversationUrl, toConversationUrl } 
 // Installed Chrome, fresh temporary profile, JS disabled: never the live AI Mode tab (SRS T-1).
 let browser, page;
 before(async () => {
-  browser = await chromium.launch({ channel: 'chrome', headless: true });
+  browser = await chromium.launch({ channel: 'chrome', headless: true, chromiumSandbox: true });
   page = await (await browser.newContext({ javaScriptEnabled: false, offline: true })).newPage();
 });
 after(() => browser?.close());

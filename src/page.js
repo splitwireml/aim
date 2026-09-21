@@ -1,6 +1,7 @@
 // Google AI Mode adapter. The only module that knows Google's page (SRS 2.3, NFR-7).
 // Selectors were observed live on 2026-09-16 (Chrome 152); see docs/evidence/T1.md and T2.md.
 import { chromium } from 'playwright-core';
+import fs from 'node:fs';
 
 export const DEFAULT_CDP_URL = 'http://127.0.0.1:9222';
 
@@ -22,16 +23,58 @@ export async function connect(cdpUrl = process.env.AIM_CDP_URL || DEFAULT_CDP_UR
   try { host = new URL(cdpUrl).hostname; } catch { throw new ConnectError(`invalid AIM_CDP_URL: ${cdpUrl}`); }
   if (!['127.0.0.1', 'localhost', '[::1]'].includes(host)) throw new ConnectError(`AIM_CDP_URL must be localhost, got ${host}`);
   let browser;
-  try { browser = await chromium.connectOverCDP(cdpUrl); } catch (e) { throw new ConnectError(`cannot attach to Chrome at ${cdpUrl}: ${e.message.split('\n')[0]}`); }
+  try { browser = await chromium.connectOverCDP(cdpUrl); } catch (e) { throw new ConnectError(`cannot attach to browser at ${cdpUrl}: ${e.message.split('\n')[0]}`); }
   const context = browser.contexts()[0];
-  if (!context) throw new ConnectError('Chrome has no default browser context');
+  if (!context) throw new ConnectError('Browser has no default browser context');
   return { browser, context };
 }
 
-/** Opens url in a new tab, or a blank tab when url is absent (the first send navigates, FR-3.2). */
-export async function openConversation(context, url) {
-  const page = await context.newPage();
-  if (url) await page.goto(url, { waitUntil: 'domcontentloaded' });
+export function tabLimit(value = 1) {
+  if (!/^[1-9]\d*$/.test(String(value)) || !Number.isSafeInteger(Number(value))) throw new ConnectError('max-tabs must be a positive integer');
+  return Number(value);
+}
+
+/** Use installed Chrome with its native profile storage and desktop browser identifier. */
+export async function launch({ profile, headless = true, maxTabs = 1, executablePath } = {}) {
+  maxTabs = tabLimit(maxTabs);
+  fs.mkdirSync(profile, { recursive: true, mode: 0o700 });
+  const engine = executablePath ? { executablePath } : { channel: 'chrome' };
+  // Discover the installed version/platform without touching the signed-in profile.
+  const probe = await chromium.launch({ ...engine, headless: true, chromiumSandbox: true });
+  let userAgent;
+  try { ({ userAgent } = await (await probe.newBrowserCDPSession()).send('Browser.getVersion')); }
+  finally { await probe.close(); }
+  const context = await chromium.launchPersistentContext(profile, {
+    ...engine, headless, ignoreDefaultArgs: true, handleSIGINT: false, handleSIGTERM: false,
+    // Match the native launch verified live. In particular, retain the real OS keychain;
+    // Playwright's mock keychain cannot read a profile signed into by native Chrome.
+    args: [`--user-data-dir=${profile}`, '--remote-debugging-pipe', '--no-first-run',
+      `--user-agent=${userAgent.replace('HeadlessChrome/', 'Chrome/')}`,
+      ...(headless ? ['--headless=new'] : []), 'about:blank'],
+  });
+  // Only our managed context: never evict tabs from a browser attached over CDP.
+  const admitted = new Set(context.pages().slice(0, maxTabs));
+  const limit = (page) => {
+    if (admitted.size >= maxTabs) { void page.close().catch(() => {}); return; }
+    admitted.add(page);
+    page.on('close', () => admitted.delete(page));
+  };
+  for (const page of admitted) page.on('close', () => admitted.delete(page));
+  context.on('page', limit);
+  await Promise.all(context.pages().filter((page) => !admitted.has(page)).map((page) => page.close()));
+  return { browser: context.browser(), context };
+}
+
+/** Reuse the managed startup blank; attached browsers get a new tab only if there is room. */
+export async function openConversation(context, url, { maxTabs = 1, reuseBlank = false } = {}) {
+  maxTabs = tabLimit(maxTabs);
+  const pages = context.pages();
+  const blank = reuseBlank && pages.find((page) => page.url() === 'about:blank');
+  if (!blank && pages.length >= maxTabs) throw new ConnectError(`tab limit (${maxTabs}) reached; close an unused tab or increase --max-tabs`);
+  const page = blank || await context.newPage();
+  try {
+    if (url) await page.goto(url, { waitUntil: 'domcontentloaded' });
+  } catch (e) { await page.close().catch(() => {}); throw e; }
   return page;
 }
 

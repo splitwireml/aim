@@ -10,7 +10,7 @@ let url = 'about:blank', turns = null, input = '', firstAt = 0, openedAt = 0;
 const currentUrl = () => process.env.STUB_AFTER_URL && Date.now() - openedAt >= Number(process.env.STUB_SWITCH_MS || 0) ? process.env.STUB_AFTER_URL : url;
 const shownTurns = () => turns && turns.map((turn, i) => ({ ...turn, signal: i ? turn.signal : Date.now() - firstAt >= Number(process.env.STUB_GENERATE_MS || 500) }));
 const page = {
-  on() {}, bringToFront: async () => {}, waitForTimeout: (ms) => new Promise((r) => setTimeout(r, ms)), url: currentUrl,
+  on() {}, close: async () => say('closed'), bringToFront: async () => {}, waitForTimeout: (ms) => new Promise((r) => setTimeout(r, ms)), url: currentUrl,
   goto: async (u) => {
     if (u.includes('q=')) {
       const query = new URL(u).searchParams.get('q');
@@ -34,7 +34,7 @@ const page = {
     press: async () => { turns.push({ query: input, text: '', signal: false }); say('sent ' + input); },
   }),
 };
-export const chromium = { connectOverCDP: async () => { say('connected'); return { on() {}, contexts: () => [{ newPage: async () => page }] }; } };`;
+export const chromium = { connectOverCDP: async () => { say('connected'); return { on() {}, contexts: () => [{ pages: () => [], newPage: async () => page }] }; } };`;
 const pwHook = `data:text/javascript,${encodeURIComponent(`import { registerHooks } from 'node:module';
 registerHooks({ resolve: (s, c, next) => s === 'playwright-core' ? { url: ${JSON.stringify(`data:text/javascript,${encodeURIComponent(pwSrc)}`)}, shortCircuit: true } : next(s, c) });`)}`;
 const cli = new URL('../bin/aim.js', import.meta.url).pathname;
@@ -45,7 +45,7 @@ function start(args, env = {}, index = null) {
   const file = path.join(dir, 'aim', 'sessions.json');
   if (index !== null) { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, index); }
   const child = spawn(process.execPath, ['--import', pwHook, cli, ...args], {
-    env: { ...process.env, ...env, XDG_CONFIG_HOME: dir },
+    env: { ...process.env, AIM_CDP_URL: 'http://127.0.0.1:9222', ...env, XDG_CONFIG_HOME: dir },
   });
   return { child, dir, file };
 }
@@ -61,6 +61,18 @@ async function finish(child, act, timeoutMs = 5000, expectedCode = 0) {
   assert.equal(code, expectedCode, err || out);
   return out + err;
 }
+
+test('external browser exit closes only the AIM tab unless keep-tab is requested', async () => {
+  for (const keep of [false, true]) {
+    const { child, dir } = start(keep ? ['--keep-tab'] : []);
+    let ended = false;
+    const out = await finish(child, (text) => {
+      if (text.includes('aim: session') && !ended) { ended = true; child.stdin.end('/quit\n'); }
+    });
+    assert.equal(out.includes('STUB closed'), !keep, out);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 for (const attentionUrl of ['https://accounts.google.com/v3/signin', 'https://consent.google.com/m']) {
   test(`CLI reports attention and never submits on ${new URL(attentionUrl).hostname}`, async () => {

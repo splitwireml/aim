@@ -13,14 +13,14 @@ const pwSrc = `const say = (s) => process.stdout.write('STUB ' + s + '\\n');
 const turns = JSON.parse(process.env.STUB_TURNS);
 let url = 'about:blank', loaded = false;
 const page = {
-  on() {}, bringToFront: async () => {}, waitForTimeout: (ms) => new Promise((r) => setTimeout(r, ms)), url: () => url,
+  on() {}, close: async () => {}, bringToFront: async () => {}, waitForTimeout: (ms) => new Promise((r) => setTimeout(r, ms)), url: () => url,
   goto: async (u) => { if (u.includes('q=')) { say('sent'); url = process.env.STUB_SENT_URL || u; } else url = process.env.STUB_RESOLVE; loaded = true; },
   evaluate: async (x) => (typeof x === 'function' ? false : loaded ? turns : null),
   evaluateHandle: async () => { say('extracted'); return { asElement: () => null }; },
   locator: (sel) => ({ first() { return this; }, isVisible: async () => true, fill: async () => say('sent'), press: async () => {},
     getAttribute: async () => (loaded && (/session-thread-id/.test(sel) ? process.env.STUB_EARLY_ID : /thread-id/.test(sel) && ('STUB_CURRENT_ID' in process.env ? process.env.STUB_CURRENT_ID : new URL(url).searchParams.get('mtid')))) || null }),
 };
-export const chromium = { connectOverCDP: async () => ({ on() {}, contexts: () => [{ newPage: async () => page }] }) };`;
+export const chromium = { connectOverCDP: async () => ({ on() {}, contexts: () => [{ pages: () => [], newPage: async () => page }] }) };`;
 const pwHook = `data:text/javascript,${encodeURIComponent(`import { registerHooks } from 'node:module';
 registerHooks({ resolve: (s, c, next) => s === 'playwright-core' ? { url: ${JSON.stringify(`data:text/javascript,${encodeURIComponent(pwSrc)}`)}, shortCircuit: true } : next(s, c) });`)}`;
 
@@ -34,7 +34,7 @@ async function runAim(args, { index, resolve = '', turns, line, done, env = {} }
   const file = path.join(dir, 'aim', 'sessions.json');
   if (index) { fs.mkdirSync(path.dirname(file)); fs.writeFileSync(file, index); }
   const child = spawn(process.execPath, ['--import', pwHook, new URL('../bin/aim.js', import.meta.url).pathname, ...args],
-    { env: { ...process.env, ...env, XDG_CONFIG_HOME: dir, STUB_RESOLVE: resolve, STUB_TURNS: JSON.stringify(turns) } });
+    { env: { ...process.env, AIM_CDP_URL: 'http://127.0.0.1:9222', ...env, XDG_CONFIG_HOME: dir, STUB_RESOLVE: resolve, STUB_TURNS: JSON.stringify(turns) } });
   let out = '', ended = false;
   const end = () => { if (!ended) { ended = true; child.stdin.end(); } };
   const timer = setTimeout(end, 20000);
