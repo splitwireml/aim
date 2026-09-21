@@ -1,5 +1,7 @@
 # SRS: `aim` — a terminal client for Google AI Mode
 
+> **Scope update, 2026-09-21:** The owner accepted the [limited personal tool](README.md) after the restoration investigation. This document retains the broader original requirements; unsupported requirements and the original M0 gate are not claimed as passed.
+
 **Status:** Draft v0.3 (reviewed by Codex) · **Owner:** tetraxzx9 · **Authors:** Claude (author), Codex (reviewer) · **Date:** 2026-09-16
 **Companion:** [`prd.md`](prd.md) · **Source:** #discussing-search-agent-development
 

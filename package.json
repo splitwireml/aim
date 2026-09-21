@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "start": "node bin/aim.js",
     "test": "node --test"
   },
   "dependencies": {

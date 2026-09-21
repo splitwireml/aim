@@ -7,6 +7,8 @@ created: 2026-09-16
 
 # Aim development strategy
 
+> **Scope update, 2026-09-21:** After the restoration investigation, the owner requested only the working features as a limited personal tool, with no further elaborate workarounds. [README](README.md) describes that deliverable. The original staged release plan below is retained for reference; its unpassed gates are not represented as completed, and its remaining work is not scheduled.
+
 **Owner:** tetraxzx9 · **Managers:** Claude and Codex · **Version:** 1.2, 2026-09-16 (final joint manager plan; T1/T2 verification exception clarified)  
 **Scope:** Execution plan only. No implementation or QA is claimed by this document.
 

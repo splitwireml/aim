@@ -1,6 +1,6 @@
 # Tasks: `aim` v0
 
-**Status:** Planned; no implementation or QA has run.  
+**Status:** On 2026-09-21 the owner accepted a limited personal tool containing the working features, without further restoration workarounds or the full planned release. See [README](README.md) for that scope. The original M0 restoration gate remains unpassed; the backlog below is historical and is not scheduled work. See [verification](docs/evidence/M0-2026-09-21.md).
 **Owner:** tetraxzx9 · **Author:** Codex · **Reviewer:** Claude · **Date:** 2026-09-16  
 **Requirements:** [srs.md](srs.md), with its explicit changes to [prd.md](prd.md).
 
@@ -8,7 +8,7 @@ Build a terminal relay to Google AI Mode with named, resumable sessions. Use Nod
 
 ## Complexity and sequence
 
-**S** = bounded, known work. **M** = several state/error paths. **L** = browser behavior to discover and prove. These are complexity labels, not time estimates. All tasks below are pending; implementation owners are unassigned.
+**S** = bounded, known work. **M** = several state/error paths. **L** = browser behavior to discover and prove. These are complexity labels, not time estimates. T1 has implementation and live evidence; T2 has implementation but has not passed the independent M0 gate. T3–T8 remain incomplete. The table below defines the planned deliverables and acceptance criteria.
 
 | ID | Task and deliverable | Size | Depends on | Parallelism | Done when |
 |---|---|---|---|---|---|

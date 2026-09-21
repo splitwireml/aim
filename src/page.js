@@ -43,7 +43,7 @@ export function isConversationUrl(url) {
   let u;
   try { u = new URL(url); } catch { return false; }
   const p = u.searchParams;
-  return u.protocol === 'https:' && u.hostname === 'www.google.com' && u.pathname === '/search' &&
+  return u.origin === 'https://www.google.com' && !u.username && !u.password && u.pathname === '/search' &&
     p.get('udm') === '50' && /^[\w-]{20,}$/.test(p.get('mstk') || '') && /^[\w-]{10,}$/.test(p.get('mtid') || '') && !p.has('q');
 }
 
@@ -52,7 +52,8 @@ export function toConversationUrl(pageUrl) {
   try { u = new URL(pageUrl); } catch { return null; }
   const out = new URL('https://www.google.com/search?udm=50');
   for (const k of ['mstk', 'mtid', 'csuir']) if (u.searchParams.has(k)) out.searchParams.set(k, u.searchParams.get(k));
-  return u.hostname === 'www.google.com' && u.searchParams.get('udm') === '50' && isConversationUrl(out.href) ? out.href : null;
+  return u.origin === 'https://www.google.com' && !u.username && !u.password && u.pathname === '/search' &&
+    u.searchParams.get('udm') === '50' && isConversationUrl(out.href) ? out.href : null;
 }
 
 /**
@@ -63,9 +64,10 @@ export function toConversationUrl(pageUrl) {
  * after acceptance, `mtid` ~0.3-2.7 s later. The early `data-session-thread-id` is never used (Review fix 3).
  * @returns {Promise<string|null>}
  */
-export async function conversationUrl(page) {
+export async function conversationUrl(page, expectedUrl) {
   const { url, shown, current } = await resolvedThread(page);
-  return shown && shown === current ? url : null;
+  const expected = expectedUrl && isConversationUrl(expectedUrl) ? threadOf(expectedUrl) : null;
+  return shown && shown === current && (!expectedUrl || shown === expected) ? url : null;
 }
 
 // Thread Google resolves for the tab: address-bar conversation URL, its mtid, and the highlighted history entry's id.

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Minimal M0 CLI (T2): named sessions, REPL, pending/recovery. T4/T5 harden validation, lock and output.
+// Limited personal CLI: named sessions, verified history import, REPL and pending/recovery.
 import { parseArgs } from 'node:util';
 import readline from 'node:readline';
 import fs from 'node:fs';
@@ -13,7 +13,7 @@ const say = (s) => process.stdout.write(s + '\n');
 const HELP = 'commands: /open /quit /help (Ctrl-D quits; Ctrl-C stops waiting locally)';
 const NAME = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 
-// ponytail: no lock and shallow index validation; T4 adds the lock and full FR-4.9 checks.
+// ponytail: no lock and shallow index validation; these limits are documented for this single-instance personal tool.
 const indexPath = path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'aim', 'sessions.json');
 function loadIndex() {
   let raw;
@@ -30,8 +30,12 @@ function saveIndex(idx) {
   fs.renameSync(tmp, indexPath);
 }
 
-const { values } = parseArgs({ options: { name: { type: 'string' }, continue: { type: 'boolean', short: 'c' }, resume: { type: 'string', short: 'r' }, help: { type: 'boolean' } } });
-if (values.help) { say('usage: aim [--name <name>] | -c | -r <name>\n' + HELP); process.exit(0); }
+const { values } = parseArgs({ options: { name: { type: 'string' }, url: { type: 'string' }, continue: { type: 'boolean', short: 'c' }, resume: { type: 'string', short: 'r' }, help: { type: 'boolean' } } });
+if (values.help) { say("usage: aim [--name <name>] | --url <google-history-url> [--name <name>] | -c | -r <name>\nimport: aim --url 'https://www.google.com/search?udm=50&mstk=…&mtid=…' [--name <name>]\n" + HELP); process.exit(0); }
+const importing = values.url !== undefined;
+if (importing && (values.continue || values.resume)) { console.error('--url cannot be combined with --continue or --resume'); process.exit(1); }
+const importUrl = importing ? P.toConversationUrl(values.url) : null;
+if (importing && !importUrl) { console.error('invalid Google AI Mode conversation URL'); process.exit(1); }
 
 const index = loadIndex();
 let name = values.resume ?? (values.continue ? index.last : values.name);
@@ -47,6 +51,7 @@ if (!resuming) {
     for (let i = 2; index.sessions[name]; i++) name = `${base}-${i}`;
   }
 }
+const expectedUrl = resuming ? index.sessions[name].url : importUrl;
 
 const cdp = process.env.AIM_CDP_URL || P.DEFAULT_CDP_URL;
 let browser, context;
@@ -55,14 +60,15 @@ try { ({ browser, context } = await P.connect(cdp)); } catch (e) {
   console.error(`${clean(e.message)}\nStart the dedicated Chrome profile with --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 (or set AIM_CDP_URL).`);
   process.exit(2);
 }
-say(`aim: session ${name} (${resuming ? 'resumed' : 'new'}) via ${cdp}`);
+say(`aim: session ${name} (${resuming ? 'resumed' : importing ? 'import' : 'new'}) via ${cdp}`);
+if (!resuming && !importing) say('[warning: reopening this session may be unavailable; import its Google AI Mode history URL with --url]');
 
 let state = 'idle'; // idle | pending | recovery
 let saved = resuming;
-let canSave = !resuming; // a resumed tab is saved only after checkWritable says writable (FR-4.4)
+let canSave = !expectedUrl; // restored/imported tabs are saved only after checkWritable says writable (FR-4.4)
 let shown = null; // markdown last printed
 let abort = null;
-const page = await P.openConversation(context, resuming ? index.sessions[name].url : undefined);
+const page = await P.openConversation(context, expectedUrl || undefined);
 
 const recover = (msg) => { state = 'recovery'; say(msg); };
 page.on('close', () => recover(`[Chrome tab closed / browser disconnected — /quit, then aim -r ${name}]`));
@@ -78,10 +84,10 @@ async function saveUrl({ skipIfBusy = false } = {}) {
 }
 async function doSave() {
   if (!canSave) return;
-  const url = await P.conversationUrl(page).catch(() => null); // final URL only (null until Google assigns mtid)
+  const cur = index.sessions[name];
+  const url = await P.conversationUrl(page, cur?.url ?? expectedUrl).catch(() => null); // final URL only (null until Google assigns mtid)
   if (!url) return;
   const now = new Date().toISOString();
-  const cur = index.sessions[name];
   if (cur?.url === url) return;
   index.sessions[name] = { url, createdAt: cur?.createdAt ?? now, lastUsedAt: now };
   index.last = name;
@@ -97,25 +103,61 @@ function print(answer) {
   if (answer.citations.length) say('\nSources\n' + answer.citations.map((c) => clean(`[${c.marker}] ${c.title} — ${c.url}`)).join('\n'));
 }
 
-if (resuming) {
+if (expectedUrl) {
   const entry = index.sessions[name];
-  const r = await P.checkWritable(page, entry.url, { firstPrompt: entry.firstPrompt });
+  const r = await P.checkWritable(page, expectedUrl, { firstPrompt: entry?.firstPrompt });
   if (r === 'attention') recover('[needs attention — run /open]');
   else if (r !== 'writable') { say('[session cannot be continued in Google — see AI Mode history, /open]'); state = 'blocked'; }
-  else { canSave = true; entry.lastUsedAt = new Date().toISOString(); index.last = name; saveIndex(index); await saveUrl(); }
+  else {
+    canSave = true;
+    if (entry) {
+      entry.lastUsedAt = new Date().toISOString();
+      index.last = name;
+      saveIndex(index);
+    }
+    await saveUrl();
+    const pending = await P.reconcile(page);
+    if (pending === 'attention') recover('[needs attention — run /open]');
+    else if (pending === 'generating') recover('[Google is still answering — wait or /open]');
+  }
 }
 
 async function turn(text) {
+  let checked = false;
   if (state === 'blocked') return say('[session cannot be continued in Google — see AI Mode history, /open]');
   if (state === 'recovery') {
     state = 'pending'; // no second prompt while reconciling
     const r = await P.reconcile(page).catch(() => 'generating');
     if (r !== 'idle') { state = 'recovery'; return say(r === 'attention' ? '[needs attention — run /open]' : '[Google is still answering — wait or /open]'); }
+    const entry = index.sessions[name];
+    const expected = entry?.url ?? expectedUrl;
+    if (expected) {
+      const writable = await P.checkWritable(page, expected, { firstPrompt: entry?.firstPrompt });
+      if (writable === 'attention') return recover('[needs attention — run /open]');
+      if (writable !== 'writable') { state = 'blocked'; return say('[session cannot be continued in Google — see AI Mode history, /open]'); }
+      if (!canSave) {
+        canSave = true;
+        if (entry) {
+          entry.lastUsedAt = new Date().toISOString();
+          index.last = name;
+          saveIndex(index);
+        }
+        await saveUrl();
+      }
+      checked = true;
+    }
     const latest = await P.latestAnswer(page);
     if (latest && latest.markdown !== shown) print(latest);
     state = 'idle';
   }
   state = 'pending';
+  const entry = index.sessions[name];
+  const expected = entry?.url ?? expectedUrl;
+  if (expected && !checked) {
+    const r = await P.checkWritable(page, expected, { firstPrompt: entry?.firstPrompt });
+    if (r === 'attention') return recover('[needs attention — run /open]');
+    if (r !== 'writable') { state = 'blocked'; return say('[session cannot be continued in Google — see AI Mode history, /open]'); }
+  }
   const { turnId, delivered } = await P.send(page, text);
   if (delivered !== 'yes') { await saveUrl(); return recover('[delivery uncertain — check with /open]'); }
   if (!saved) say('[waiting for Google to assign a conversation URL]');
