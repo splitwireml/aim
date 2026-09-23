@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { chromium } from 'playwright-core';
-import { AimSession, AimError } from 'aim';
+import { AimSession, AimError } from 'aim-session-sdk';
 
 test('SDK validates options before launching a browser', async () => {
   assert.throws(() => new AimSession(), /AimSession.create/);

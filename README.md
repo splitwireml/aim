@@ -1,108 +1,26 @@
-# aim
+# AIM
 
-A small terminal client for Google AI Mode. Ask questions, read answers with source links, and continue the conversation with follow-up questions.
+A JavaScript/TypeScript SDK and CLI for Google AI Mode. Create a session, ask questions, and continue the conversation with follow-ups. Answers include Markdown and source citations.
 
-**Live browser status (September 21):** native headless Chrome 153 passed a signed-in question and contextual follow-up using its normal desktop browser identifier. AIM now launches installed Chrome headlessly with native profile storage, one tab by default, and browser shutdown on exit. Obscura remains experimental and failed the live answer check. See the [live results](docs/evidence/obscura-live-2026-09-21.md).
+Requires **Node.js 24 or later**, installed **Google Chrome**, and a Google account with AI Mode access. Chrome is not downloaded during installation. AIM controls a local browser; it is not an official Google API or a browser-side JavaScript library.
 
-This is the limited personal version requested on September 21, 2026. New conversations work while the tool is open. Reopening a newly created conversation is not reliable: Google can change its identity. The tool refuses an uncertain match rather than sending your question to a different conversation.
+## Install and sign in
 
-Conversations selected from Google's saved AI Mode history reopened with a stable identity in the live checks. You can import one using its browser address. This was tested on one account on macOS; reopening after a full Chrome restart remains unverified.
-
-## Setup
-
-Requires Node.js 24. Install the dependencies:
+After publication to npm:
 
 ```sh
-npm ci
+npm install aim-session-sdk
+npx aim --headed
 ```
 
-### Obscura (experimental Rust engine)
+Sign into Google in the visible browser, then type `/quit` in the terminal. The SDK and CLI reuse that saved login. Use `npx aim --headed --max-tabs 2` if login needs a popup. The complete fresh-device sign-in workflow has not yet been verified end to end.
 
-[Obscura](https://github.com/h4ckf0r0day/obscura) runs headlessly without Chromium. Install its binary from the official releases, then start a dedicated server in one terminal:
+The default dedicated profile is `$XDG_CONFIG_HOME/aim/chrome` or `~/.config/aim/chrome`. To use another profile, set `AIM_PROFILE_DIR` for both sign-in and SDK usage. Do not point AIM at a profile already open in Chrome.
 
-```sh
-mkdir -p "$HOME/.config/aim/obscura"
-chmod 700 "$HOME/.config/aim/obscura"
-obscura serve --host 127.0.0.1 --port 9223 \
-  --storage-dir "$HOME/.config/aim/obscura" --max-connections 1
-```
-
-In another terminal:
-
-```sh
-AIM_CDP_URL=http://127.0.0.1:9223 npm start -- --max-tabs 1
-```
-
-The storage directory retains Obscura cookies and localStorage across server restarts. It is **not a Chromium profile**; pointing it at your Chrome profile will not import your login. Obscura has no visible window for `/open`. A Google sign-in/CAPTCHA that needs a visible browser requires the Chromium option below. The signed-in live check failed: after loading the imported session and forcing English, Google displayed “Something went wrong” instead of an answer. See the [live result](docs/evidence/obscura-live-2026-09-21.md). Local checks on Obscura 0.2.3 passed CDP connection, the actual AIM answer extractor, textarea input, and the signed-out Google landing page. See [browser research and limitations](docs/evidence/browser-options-2026-09-21.md).
-
-Keep the server on localhost and its storage directory private. Stop the server with Ctrl-C when finished to release its memory; AIM closes only its own conversation tab on exit. `--keep-tab` retains that tab if you need to preserve an ongoing conversation. Repeated retained tabs count toward the limit.
-
-### Managed headless Chrome (default)
-
-Requires installed Google Chrome. Without `AIM_CDP_URL`, AIM starts Chrome headlessly, reuses its startup tab, and shuts it down on exit. Sign in once in visible mode:
-
-```sh
-npm start -- --headed
-```
-
-Sign into Google, then `/quit`. Subsequent `npm start` runs headlessly using the same full profile. The profile defaults to `$XDG_CONFIG_HOME/aim/chrome` or `~/.config/aim/chrome`. `--profile <directory>` or `AIM_PROFILE_DIR` selects another **dedicated** profile. `AIM_BROWSER_EXECUTABLE` selects a custom Chromium-compatible executable; Obscura uses the CDP setup above instead.
-
-AIM discovers the installed browser's actual version and platform with a short-lived blank browser, then launches the signed-in profile using Chrome's normal desktop identifier. Google's device check rejected the default `HeadlessChrome` identifier. Native profile storage avoids Playwright's test-keychain settings. Neither CAPTCHA handling nor automatic query retries are added. If Google asks for verification, quit and restart with `--headed`.
-
-`--max-tabs N` (or `AIM_MAX_TABS=N`) sets the limit; default **1**. Managed browsers close excess popup tabs. External CDP browsers refuse a new AIM tab when already at the limit and do not evict existing tabs. Use `--max-tabs 2` when a visible login needs a popup.
-
-The live headless question and follow-up passed with a native launch. The managed launcher passed local profile-persistence, tab-limit, and shutdown checks. Google later issued an unusual-traffic challenge during comparisons, so a further live query through the final managed launcher was not attempted. These checks do not establish indefinite Google compatibility or a measured RAM reduction.
-
-To keep using an existing dedicated Chrome/Chromium browser, set `AIM_CDP_URL` explicitly. Managed-browser options cannot change an externally running browser's profile or visibility.
-
-## Use
-
-Start a new conversation:
-
-```sh
-npm start
-# Optional name:
-npm start -- --name research
-```
-
-Type your question, press Enter, and wait for the answer before asking a follow-up.
-
-To continue a conversation already in Google's history:
-
-1. In the visible browser window, open AI Mode history and select the conversation.
-2. Wait for it to load, then copy the browser address.
-3. Start the tool with that address, keeping the quotes:
-
-```sh
-npm start -- --name research-history --url 'PASTE_THE_ADDRESS_HERE'
-```
-
-The tool checks the conversation before saving it. The original question is removed from the address before navigation, so importing does not replay it. If Google returns a different conversation, importing is refused.
-
-After a successful import, try continuing the most recently used conversation or a named one:
-
-```sh
-npm start -- -c
-npm start -- -r research-history
-```
-
-If reopening is refused, use `/open` and continue in Google, or select the intended conversation in Google's history and import it under a new name. A saved entry means the address was recorded; it does not guarantee Google will preserve that conversation identity later.
-
-| Command | Action |
-| --- | --- |
-| `/open` | Bring a visible browser tab forward; headless mode prints restart instructions. |
-| `/help` | Show available commands. |
-| `/quit` or Ctrl-D | Save, close the AIM tab, and stop a managed browser. External servers stay running. |
-| Ctrl-C | Stop waiting locally. Google may still be answering. |
-
-During an answer, additional questions are rejected, not queued. After an interruption, retry once Google finishes; the tool checks that it is ready. A sign-in or consent message needs your attention in a visible browser (`--headed`). Sign-in detection has controlled checks, but the complete signed-out workflow remains unverified.
-
-## Node.js SDK
-
-Install this checkout in another Node.js project with `npm install /absolute/path/to/aim` (the package is not published to npm). JavaScript and TypeScript use the same API:
+## SDK
 
 ```js
-import { AimSession } from 'aim';
+import { AimSession } from 'aim-session-sdk';
 
 const session = await AimSession.create();
 try {
@@ -117,27 +35,75 @@ try {
 }
 ```
 
-Each object owns one live conversation. Keep it open for follow-ups. `create()` starts headless Chrome with the same dedicated profile as the CLI; sign in first using `npm start -- --headed`, then quit the CLI before using the SDK. Options are `profile`, `headless`, `executablePath`, `maxTabs` (default 1), `cdpUrl` (localhost only), and `timeoutMs` (default 120000). The browser/profile environment variables described above also apply; `timeoutMs` is set through the SDK options. Use distinct profiles for independent managed sessions.
+Each object owns one live conversation. Keep it open to retain context; SDK sessions cannot be reopened after closing and do not write the CLI session index. Await each question before asking another. `close()` is safe to repeat and supports `await using` through `Symbol.asyncDispose`.
 
-`ask()` returns `{ markdown, citations, unresolved }` only after a complete answer. `unresolved` counts visible citation chips without an extractable source. Await each question before asking another. `ask(question, { timeoutMs, signal })` supports a per-answer timeout and an `AbortSignal`. The timeout covers answer waiting; submission and readiness checks take additional time. Cancellation stops local waiting, so Google may continue generating.
+TypeScript declarations are included. Use TypeScript 5.2 or later with Node module resolution (`NodeNext`), and include `ESNext.Disposable` in your `lib` settings when your target does not already include it.
 
-Handle `AimError` using its `code`: `BUSY`, `ATTENTION`, `CONVERSATION_CHANGED`, `DELIVERY_UNCERTAIN`, `ABORTED`, `INCOMPLETE`, or `CLOSED`. An incomplete/interrupted response can include `error.answer` with partial content. Invalid arguments throw `TypeError`; a signal already aborted before submission throws its abort reason. Browser/connection failures may also propagate. Questions are never automatically retried. After an interruption, the next `ask()` checks that Google is ready before submitting.
+### Options
 
-`close()` is safe to repeat and supports `await using` through `Symbol.asyncDispose`. It shuts down a managed browser. With `cdpUrl`, it closes only this session's tab and disconnects, leaving the external browser and other tabs running. Closing during a question may interrupt it. SDK sessions do not write the CLI session index or support reopening after close; keep the object alive to retain context. The existing Google/browser limitations still apply.
+`AimSession.create(options)` accepts:
+
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `profile` | `AIM_PROFILE_DIR` or the default above | Dedicated Chrome profile directory. |
+| `headless` | `true` | Set `false` to display managed Chrome. |
+| `executablePath` | `AIM_BROWSER_EXECUTABLE` or installed Chrome | Custom Chromium-compatible executable. |
+| `maxTabs` | `AIM_MAX_TABS` or `1` | Total tab limit. |
+| `cdpUrl` | `AIM_CDP_URL` | Attach to an existing browser on localhost. |
+| `timeoutMs` | `120000` | Answer-wait timeout in milliseconds. |
+
+`ask(question, { timeoutMs, signal })` supports a per-answer timeout and an `AbortSignal`. The timeout covers answer waiting; submission and readiness checks take additional time. Cancellation stops local waiting, so Google may continue generating. The next `ask()` checks readiness before submitting. Questions are never automatically retried.
+
+`ask()` returns `{ markdown, citations, unresolved }` only after a complete answer. `unresolved` counts visible citation chips without an extractable source.
+
+Import `AimError` and inspect `error.code` to handle `BUSY`, `ATTENTION`, `CONVERSATION_CHANGED`, `DELIVERY_UNCERTAIN`, `ABORTED`, `INCOMPLETE`, or `CLOSED`. Incomplete/interrupted answers may be available as `error.answer`. Invalid arguments throw `TypeError`; an already-aborted signal throws its abort reason. Browser and connection failures may also propagate.
+
+Without `cdpUrl`, closing a session shuts down its managed browser. With `cdpUrl`, closing a session closes only its tab and disconnects, leaving the external browser and other tabs running. External browsers must already have room for a new tab; `maxTabs` counts existing tabs. Do not combine `cdpUrl` with managed profile/executable options or `headless: false`.
+
+## CLI
+
+```sh
+npx aim                     # New conversation
+npx aim --name research      # Named conversation
+npx aim -c                  # Try continuing the last saved conversation
+npx aim -r research         # Try continuing a named conversation
+npx aim --help
+```
+
+Type a question and wait for the answer before asking a follow-up. `/help` shows commands, `/open` brings a visible tab forward, and `/quit` or Ctrl-D exits. Ctrl-C stops local waiting. If Google needs verification, quit and restart with `--headed` and the same profile.
+
+To import a conversation, select it in Google's AI Mode history and copy its browser address:
+
+```sh
+npx aim --name saved --url 'PASTE_THE_GOOGLE_HISTORY_ADDRESS_HERE'
+```
+
+AIM removes the original query from the URL before navigation and verifies the conversation identity before accepting follow-ups. Reopening newly created conversations is unreliable because Google can change their identity; a saved address does not guarantee restoration. Imported history conversations passed live checks on one account, but reopening after a full Chrome restart remains unverified.
+
+Use `--keep-tab` only with an external browser via `AIM_CDP_URL` if the live tab must survive CLI exit. CLI session addresses are stored in `$XDG_CONFIG_HOME/aim/sessions.json` or `~/.config/aim/sessions.json`; treat this as private account data.
 
 ## Limits
 
-- Exiting closes the conversation tab by default, including unfinished or unsaved conversations. Use an external visible browser with `--keep-tab` when the live tab must survive exit.
-- Run **one aim process at a time**. This version does not have a process lock.
-- Session addresses live in `$XDG_CONFIG_HOME/aim/sessions.json`, or `~/.config/aim/sessions.json`. Treat this file as private account data. Keep a copy before editing it; validation is still limited.
-- Some citation chips hide additional sources. The tool prints links it can observe; it does not invent missing links.
-- Browser markup can change. Live checks covered macOS, Chrome 153, and an English interface. Linux is untested.
-- Use this as a personal tool. Compatibility with Google's terms has not been reviewed; this project does not claim otherwise.
+- Run one CLI process at a time. The CLI index has no process lock. Use distinct dedicated profiles for independent managed SDK sessions, and quit the CLI before using its profile in the SDK.
+- Closing a session can interrupt an unfinished answer. There is no automatic sign-in, CAPTCHA solver, or query retry.
+- Browser markup can change. Live checks covered macOS, Chrome 153, and an English interface. Linux and Windows remain unverified; automated SDK checks use offline browser fixtures.
+- Some source chips hide additional links. AIM returns only sources it can observe.
+- This is a personal tool. Compatibility with Google's terms has not been reviewed, and Google compatibility is not guaranteed.
 
-## Checks
+## Develop and release
+
+From a source checkout:
 
 ```sh
+npm ci
 npm test
+npm pack --dry-run
 ```
 
-The suite uses Node's test runner, isolated temporary state, and installed Chrome for offline answer fixtures and disposable profiles for browser lifecycle checks. It does not use the signed-in browser. See the [limited-tool checks](docs/evidence/limited-tool-2026-09-21.md), [earlier verification](docs/evidence/M0-2026-09-21.md), and [restoration investigation](docs/evidence/restoration-feasibility-2026-09-21.md) for the live results and remaining limitations.
+The tests require installed Chrome and use disposable profiles and offline fixtures, not your signed-in browser. The npm package includes only the runtime, types, README, and package manifest. Detailed usage and historical browser evidence remain in the source checkout under `docs/`.
+
+To publish from the source checkout, sign into npm with an account allowed to publish the package, then run `npm publish`. The `prepublishOnly` script runs the test suite before publishing. Publication is public; the name is not reserved until a successful publish. Version `0.1.0` is the initial release candidate.
+
+## License
+
+UNLICENSED. All rights reserved; no open-source license has been granted.
